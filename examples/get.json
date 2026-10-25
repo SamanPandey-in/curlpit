@@ -1,0 +1,7 @@
+{
+  "name": "Simple GET",
+  "method": "GET",
+  "url": "https://{{host}}/get",
+  "params": [{ "key": "hello", "value": "world" }],
+  "auth": { "type": "bearer", "token": "{{token}}" }
+}

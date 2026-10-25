@@ -1,0 +1,6 @@
+{
+  "name": "POST JSON",
+  "method": "POST",
+  "url": "https://{{host}}/post",
+  "body": { "type": "json", "raw": "{\"name\":\"{{user}}\"}" }
+}

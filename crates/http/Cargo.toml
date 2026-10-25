@@ -1,0 +1,19 @@
+[package]
+name = "at-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "at_http"
+
+[dependencies]
+at-core = { path = "../core" }
+reqwest.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time", "io-util"] }

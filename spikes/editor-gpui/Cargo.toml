@@ -1,0 +1,10 @@
+[package]
+name = "spike-editor-gpui"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+gpui = { version = "0.2", features = ["runtime_shaders"] }
+# 0.5.x is the line that targets gpui 0.2.x. Newer lines (0.6, "GPUI Kit") split Input/Textarea/Editor
+# and use a different gpui distribution, so they are NOT tried in this spike.
+gpui-component = "0.5"

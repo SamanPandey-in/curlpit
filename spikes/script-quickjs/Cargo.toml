@@ -1,0 +1,8 @@
+[package]
+name = "spike-script-quickjs"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+# "0" = newest 0.x; written against the 0.9 API. If it fails to compile, send me the error.
+rquickjs = "0"

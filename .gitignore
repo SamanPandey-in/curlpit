@@ -1,0 +1,25 @@
+# Rust build artifacts (root workspace + spikes workspace)
+target/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment & secrets
+.env
+.env.*
+*.pem
+
+# Logs
+*.log
+
+# Misc build outputs
+*.bin

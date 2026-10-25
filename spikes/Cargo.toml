@@ -1,0 +1,11 @@
+# Separate workspace: spikes are throw-away measurements and must not slow the main workspace/CI.
+[workspace]
+resolver = "2"
+members = ["gpui-hello", "viewer-index", "script-quickjs", "viewer-gpui", "editor-gpui"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

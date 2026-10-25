@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/http", "crates/demo"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", "io-util", "net"] }
+tokio-util = "0.7"
+bytes = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "gzip", "brotli", "zstd", "http2"] }
+
+# Size AND speed: fat LTO + 1 codegen unit + abort-on-panic + stripped symbols.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+debug = "line-tables-only"
