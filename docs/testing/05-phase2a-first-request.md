@@ -34,21 +34,29 @@ Pass/fail per row (describe any ❌), the memory shown for the app after #9, and
 
 
 ---
-## Re-test after the width fix (viewer horizontal scroll)
-Changes: the response viewer now scrolls sideways (two-finger swipe left/right, or Shift+scroll), sized to the longest line; very long lines (minified HTML etc.) are split into 4,000-byte rows so they stay fast; line numbers count those rows.
+## Round 3: sticky line numbers + text wrap
+
+What changed: (1) the line-number column stays put while you scroll sideways; (2) a **Wrap: off / on** button appears at the right of the status line when text is wider than the window; (3) with wrap on, a long line continues on the next row(s) with a **blank** gutter, and line numbers never shift (the next real line keeps its true number); (4) wrapping re-flows when you resize the window.
+
+Known limits (by design for now): wrap width is computed from an estimated character width (monospace assumed; emoji/CJK wide glyphs may overflow slightly); diagonal swipes can drop a bit of sideways movement; no visible scrollbar yet; resizing a huge body (50 MB) with wrap on may stutter.
 
 ```
 cd ~/inCoding/nextgen/api-tester
-tar xzf ~/Downloads/api-tester-widthfix.tar.gz --strip-components=1
+tar xzf ~/Downloads/api-tester-wrap.tar.gz --strip-components=1
 cargo fmt --all
-cargo test -p at-core        # expect 26 passed (4 new for the line index)
+cargo test -p at-core        # expect 28 passed (6 line-index tests; the old 4 were replaced)
 cargo run --release -p at-app
 ```
 | # | Do | Expect |
 |---|---|---|
-| W1 | `https://jsonplaceholder.typicode.com/photos`, make the window narrow | long lines are cut at the edge but you can swipe sideways to read the rest |
-| W2 | Widen the window | no phantom scroll area; content fills, sideways scroll disappears when everything fits |
-| W3 | `https://example.com` (HTML) | text shown, scrolls sideways if lines are long |
-| W4 | A response with one huge line, e.g. `https://httpbin.org/bytes/200000` (binary garbage) | no freeze; shown as many ~4,000-byte rows |
-| W5 | Vertical scroll still smooth on the 5 MB response; memory still ~140 MB | yes |
-Note: no visible sideways scrollbar yet (swipe only). I'll add scrollbars with the next slice.
+| R1 | `https://jsonplaceholder.typicode.com/photos`, narrow the window, swipe sideways | text moves, **line numbers stay fixed** at the left |
+| R2 | Widen the window until everything fits | **Wrap** button disappears; no sideways scroll |
+| R3 | Narrow again, click **Wrap: off** | button reads "Wrap: on"; long lines continue on following rows; those rows have an **empty** gutter |
+| R4 | In wrap mode, look at the numbers around a wrapped line | numbers go 5, (blank), 6 — never 5, 6, 7 for the same line |
+| R5 | Resize the window slowly in wrap mode | text re-wraps to the new width, no jumping/flicker; right edge not clipped |
+| R6 | Toggle wrap off again | back to one row per line; sideways scroll works; position resets to the left |
+| R7 | `https://example.com` and `https://httpbin.org/html` | wrap button appears only when text really overflows |
+| R8 | `https://httpbin.org/bytes/200000` (garbage bytes) | no freeze with wrap on or off |
+| R9 | Scroll the 5 MB photos response vertically in wrap mode | still smooth; memory still roughly 140–160 MB |
+
+Report: pass/fail per row; for any wrap alignment issue, tell me if text is clipped at the right (my width estimate is too big) or leaves a gap (too small).

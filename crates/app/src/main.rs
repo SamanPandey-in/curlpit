@@ -2,17 +2,20 @@
 //! Network work runs on its own tokio threads; results come back over a channel.
 use std::sync::Arc;
 
-use at_core::lines::{index_lines, longest_line};
+use at_core::lines::{build_rows, count_chars, RowIndex, CONT, MAX_ROW_CHARS};
 use at_core::{build, pretty::pretty_json, Body, Method, Request, Variables};
 use at_http::{send, EngineConfig, HttpError, ResponseBody};
 use gpui::{
     div, prelude::*, px, rgb, size, uniform_list, App, Application, Bounds, Context, Entity, Hsla,
-    ListHorizontalSizingBehavior, Window, WindowBounds, WindowOptions,
+    ScrollWheelEvent, Window, WindowBounds, WindowOptions,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Root};
 use tokio_util::sync::CancellationToken;
+
+/// Width of the sticky line-number gutter (px).
+const GUTTER: f32 = 76.0;
 
 fn mono() -> &'static str {
     if cfg!(target_os = "macos") {
@@ -22,6 +25,20 @@ fn mono() -> &'static str {
     } else {
         "DejaVu Sans Mono"
     }
+}
+
+/// Advance width of one monospace character at 13 px (estimate; used for wrapping and scroll limits).
+fn char_w() -> f32 {
+    if cfg!(target_os = "windows") {
+        7.2
+    } else {
+        7.83
+    }
+}
+
+/// Pixels available for text in the response pane.
+fn avail_width(window: &Window) -> f32 {
+    (f32::from(window.viewport_size().width) - GUTTER - 12.0).max(50.0)
 }
 
 fn c(hex: u32) -> Hsla {
@@ -79,9 +96,12 @@ enum Status {
 
 struct ViewData {
     data: Arc<Vec<u8>>,
-    idx: Arc<Vec<u32>>,
-    /// Index of the longest line; sizes the horizontal scroll area.
-    longest: usize,
+    /// Rows without wrapping (hard lines, plus a safety split for monstrous lines).
+    base: Arc<RowIndex>,
+    /// Rows wrapped to a column count; rebuilt when the window width changes.
+    wrapped: Option<(usize, Arc<RowIndex>)>,
+    /// Characters in the longest row; sizes the horizontal scroll range.
+    longest_chars: usize,
 }
 
 struct Workspace {
@@ -92,6 +112,9 @@ struct Workspace {
     status: Status,
     view: Option<ViewData>,
     cancel: Option<CancellationToken>,
+    wrap: bool,
+    /// Horizontal scroll of the response text in px (0 = left edge). The gutter never moves.
+    scroll_x: f32,
 }
 
 impl Workspace {
@@ -111,17 +134,29 @@ impl Workspace {
             status: Status::Idle,
             view: None,
             cancel: None,
+            wrap: false,
+            scroll_x: 0.0,
         }
     }
 
     fn set_view(&mut self, data: Vec<u8>) {
-        let idx = index_lines(&data);
-        let longest = longest_line(&data, &idx);
+        let base = build_rows(&data, MAX_ROW_CHARS);
+        let longest = base.longest_row(&data);
+        let longest_chars = count_chars(base.row(&data, longest));
         self.view = Some(ViewData {
             data: Arc::new(data),
-            idx: Arc::new(idx),
-            longest,
+            base: Arc::new(base),
+            wrapped: None,
+            longest_chars,
         });
+        self.scroll_x = 0.0;
+    }
+
+    fn max_scroll_x(&self, avail: f32) -> f32 {
+        match &self.view {
+            Some(v) => (v.longest_chars as f32 * char_w() + 24.0 - avail).max(0.0),
+            None => 0.0,
+        }
     }
 
     /// Send, or cancel if a request is already in flight.
@@ -202,7 +237,7 @@ impl Workspace {
                     }
                     ResponseBody::File { path, len } => {
                         let msg = format!(
-                            "The response body is {} and was saved to:\n{}\n\n(The viewer for large spilled bodies arrives in the next slice.)",
+                            "The response body is {} and was saved to:\n{}\n\n(The viewer for large spilled bodies arrives in a later slice.)",
                             human(len),
                             path.display()
                         );
@@ -223,9 +258,40 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // ---- viewer geometry (depends on the current window width) ----
+        let avail = avail_width(window);
+        let cols = (((avail / char_w()).floor() as usize).saturating_sub(1)).max(10);
+        if self.wrap {
+            if let Some(v) = self.view.as_mut() {
+                let stale = match &v.wrapped {
+                    Some((c, _)) => *c != cols,
+                    None => true,
+                };
+                if stale {
+                    let rows = build_rows(&v.data, cols);
+                    v.wrapped = Some((cols, Arc::new(rows)));
+                }
+            }
+        }
+        let overflow = self
+            .view
+            .as_ref()
+            .map(|v| v.longest_chars as f32 * char_w() > avail)
+            .unwrap_or(false);
+        let max_x = self.max_scroll_x(avail);
+        if self.scroll_x > max_x {
+            self.scroll_x = max_x;
+        }
+        let scroll_x = if self.wrap { 0.0 } else { self.scroll_x };
+
         let theme = cx.theme();
-        let (bg, fg, muted) = (theme.background, theme.foreground, theme.muted_foreground);
+        let (bg, fg, muted, border) = (
+            theme.background,
+            theme.foreground,
+            theme.muted_foreground,
+            theme.border,
+        );
         let in_flight = self.cancel.is_some();
 
         let top = div()
@@ -272,39 +338,90 @@ impl Render for Workspace {
             Status::Error(e) => (e.clone(), c(0xf38ba8)),
         };
 
+        // The wrap toggle appears only when text overflows the window (or while wrap is on).
+        let wrap_btn = (self.wrap || overflow).then(|| {
+            Button::new("wrap")
+                .label(if self.wrap { "Wrap: on" } else { "Wrap: off" })
+                .on_click(cx.listener(|this, _ev, _window, cx| {
+                    this.wrap = !this.wrap;
+                    this.scroll_x = 0.0;
+                    if !this.wrap {
+                        if let Some(v) = this.view.as_mut() {
+                            v.wrapped = None;
+                        }
+                    }
+                    cx.notify();
+                }))
+        });
+
+        let status_row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .px_3()
+            .py_1()
+            .child(div().text_color(status_col).child(status_text))
+            .children(wrap_btn);
+
         let viewer = match &self.view {
             Some(v) => {
+                let rows = if self.wrap {
+                    v.wrapped
+                        .as_ref()
+                        .map(|(_, r)| r.clone())
+                        .unwrap_or_else(|| v.base.clone())
+                } else {
+                    v.base.clone()
+                };
                 let data = v.data.clone();
-                let idx = v.idx.clone();
-                let longest = v.longest;
-                let n = idx.len();
+                let n = rows.len();
                 uniform_list("response", n, move |range, _window, _cx| {
                     let mut items = Vec::new();
                     for ix in range {
-                        let start = idx[ix] as usize;
-                        let end = idx.get(ix + 1).map(|&e| e as usize).unwrap_or(data.len());
-                        let text = String::from_utf8_lossy(&data[start..end])
+                        let mut text = String::from_utf8_lossy(rows.row(&data, ix))
                             .trim_end()
                             .to_string();
+                        if text.contains('\t') {
+                            text = text.replace('\t', "    ");
+                        }
+                        // Continuation rows of a wrapped line get an empty gutter, so numbers
+                        // stay attached to the first row of their line.
+                        let label = if rows.lines[ix] & CONT != 0 {
+                            String::new()
+                        } else {
+                            rows.line_no(ix).to_string()
+                        };
                         items.push(
                             div()
                                 .flex()
                                 .flex_row()
                                 .h(px(18.))
+                                // sticky gutter: lives outside the horizontally shifted text
                                 .child(
                                     div()
-                                        .w(px(76.))
+                                        .w(px(GUTTER))
+                                        .flex_none()
                                         .px_2()
                                         .text_color(muted)
-                                        .child(format!("{}", ix + 1)),
+                                        .border_r_1()
+                                        .border_color(border)
+                                        .child(label),
                                 )
-                                .child(div().whitespace_nowrap().child(text)),
+                                .child(
+                                    div().flex_1().overflow_hidden().child(
+                                        div()
+                                            .relative()
+                                            .left(px(-scroll_x))
+                                            .flex_none()
+                                            .whitespace_nowrap()
+                                            .child(text),
+                                    ),
+                                ),
                         );
                     }
                     items
                 })
-                .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-                .with_width_from_item(Some(longest))
                 .h_full()
                 .into_any_element()
             }
@@ -323,19 +440,30 @@ impl Render for Workspace {
             .text_color(fg)
             .child(top)
             .children(body_editor)
-            .child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .text_color(status_col)
-                    .child(status_text),
-            )
+            .child(status_row)
             .child(
                 div()
                     .flex_1()
                     .overflow_hidden()
                     .font_family(mono())
                     .text_size(px(13.))
+                    // horizontal scrolling is ours (so the gutter can stay put); vertical is the list's
+                    .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, cx| {
+                        if this.wrap {
+                            return;
+                        }
+                        let d = ev.delta.pixel_delta(px(18.));
+                        let mut dx = f32::from(d.x);
+                        if dx == 0.0 && ev.modifiers.shift {
+                            dx = f32::from(d.y);
+                        }
+                        if dx == 0.0 {
+                            return;
+                        }
+                        let max = this.max_scroll_x(avail_width(window));
+                        this.scroll_x = (this.scroll_x - dx).clamp(0.0, max);
+                        cx.notify();
+                    }))
                     .child(viewer),
             )
     }

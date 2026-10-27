@@ -44,3 +44,7 @@ Caveat: CI on macOS runners will use the same flag so CI and local builds match.
 - **D21: GUI crate excluded from `default-members`** so CI and `cargo test` stay fast; it builds with `-p at-app`. A separate CI job will build it later.
 - **Variable highlighting plan:** a plain input can't colour `{{x}}`. Short-term: unresolved-variable warning in the status line; later: custom URL field or highlight ranges via the editor's highlighter API.
 - **Key repeat (macOS):** to confirm it's the press-and-hold popup, run `defaults write -g ApplePressAndHoldEnabled -bool false`, restart the spike and hold a key. Undo that test with `defaults delete -g ApplePressAndHoldEnabled`. The shipped app will set this for its own domain at startup.
+
+## D22: wrapping uses monospace column math, not text measurement (2026-10-27)
+The viewer must stay a fixed-row-height virtual list (that is what keeps 50 MB at ~130 MB RAM and smooth). So wrapping is done by splitting rows at N characters in a precomputed row index (`at_core::lines`), where N comes from window width / estimated character width. Each row stores its logical line number, with a continuation flag, so numbers never shift. Trade-off: wide glyphs (CJK/emoji) can overflow; if the width estimate is off on some OS, we measure the real glyph advance via GPUI's text system.
+Sticky gutter: horizontal scroll is handled by the app (not the list), so the gutter is simply not shifted.
