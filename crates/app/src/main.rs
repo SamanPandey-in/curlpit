@@ -2,11 +2,12 @@
 //! Network work runs on its own tokio threads; results come back over a channel.
 use std::sync::Arc;
 
+use at_core::lines::{index_lines, longest_line};
 use at_core::{build, pretty::pretty_json, Body, Method, Request, Variables};
 use at_http::{send, EngineConfig, HttpError, ResponseBody};
 use gpui::{
     div, prelude::*, px, rgb, size, uniform_list, App, Application, Bounds, Context, Entity, Hsla,
-    Window, WindowBounds, WindowOptions,
+    ListHorizontalSizingBehavior, Window, WindowBounds, WindowOptions,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
@@ -64,17 +65,6 @@ fn human(bytes: u64) -> String {
     }
 }
 
-fn index_lines(b: &[u8]) -> Vec<u32> {
-    let mut v = Vec::with_capacity(b.len() / 30 + 1);
-    v.push(0u32);
-    for (i, &ch) in b.iter().enumerate() {
-        if ch == b'\n' && i + 1 < b.len() {
-            v.push((i + 1) as u32);
-        }
-    }
-    v
-}
-
 enum Status {
     Idle,
     Loading,
@@ -90,6 +80,8 @@ enum Status {
 struct ViewData {
     data: Arc<Vec<u8>>,
     idx: Arc<Vec<u32>>,
+    /// Index of the longest line; sizes the horizontal scroll area.
+    longest: usize,
 }
 
 struct Workspace {
@@ -124,9 +116,11 @@ impl Workspace {
 
     fn set_view(&mut self, data: Vec<u8>) {
         let idx = index_lines(&data);
+        let longest = longest_line(&data, &idx);
         self.view = Some(ViewData {
             data: Arc::new(data),
             idx: Arc::new(idx),
+            longest,
         });
     }
 
@@ -282,6 +276,7 @@ impl Render for Workspace {
             Some(v) => {
                 let data = v.data.clone();
                 let idx = v.idx.clone();
+                let longest = v.longest;
                 let n = idx.len();
                 uniform_list("response", n, move |range, _window, _cx| {
                     let mut items = Vec::new();
@@ -303,11 +298,13 @@ impl Render for Workspace {
                                         .text_color(muted)
                                         .child(format!("{}", ix + 1)),
                                 )
-                                .child(div().child(text)),
+                                .child(div().whitespace_nowrap().child(text)),
                         );
                     }
                     items
                 })
+                .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+                .with_width_from_item(Some(longest))
                 .h_full()
                 .into_any_element()
             }
