@@ -37,3 +37,10 @@ Caveat: CI on macOS runners will use the same flag so CI and local builds match.
 ## Spike 4 result and ecosystem risk (2026-10-25)
 - **D14 upgraded: GPUI is GO for the viewer** (10 MB: 84 MB RSS flat; 50 MB: 130 MB; smooth).
 - **R1 (new risk): GPUI ecosystem churn.** crates.io `gpui 0.2.2` is an older snapshot. Newer GPUI distributions split into several crates (`gpui_platform` etc.) and `gpui-component` has moved to a new "GPUI Kit" 0.6 with a different editor API. We stay on gpui 0.2.x + gpui-component 0.5.x for now, keep all GPUI code in the `app` crate, and treat an upgrade as a scheduled task (plan section 7), not a surprise.
+
+## Spike 5 result and Phase 2 choices (2026-10-25)
+- **D19: adopt `gpui-component` 0.5 for inputs/editors/buttons.** Verified on your Mac: JSON highlighting, line numbers, select/copy/paste, undo/redo, no lag on a ~9,500-line (1 MB) document. Known gaps, tracked: no auto-close of brackets/quotes, no auto-indent, no key-repeat when holding a key (likely the macOS press-and-hold setting, test below), find does not jump to matches, no `{{variable}}` highlighting.
+- **D20: threading.** tokio runtime with 2 worker threads for networking only; results return over an `async-channel` and are applied on the UI thread via `cx.spawn`. UI never blocks.
+- **D21: GUI crate excluded from `default-members`** so CI and `cargo test` stay fast; it builds with `-p at-app`. A separate CI job will build it later.
+- **Variable highlighting plan:** a plain input can't colour `{{x}}`. Short-term: unresolved-variable warning in the status line; later: custom URL field or highlight ranges via the editor's highlighter API.
+- **Key repeat (macOS):** to confirm it's the press-and-hold popup, run `defaults write -g ApplePressAndHoldEnabled -bool false`, restart the spike and hold a key. Undo that test with `defaults delete -g ApplePressAndHoldEnabled`. The shipped app will set this for its own domain at startup.
