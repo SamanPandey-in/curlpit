@@ -48,3 +48,7 @@ Caveat: CI on macOS runners will use the same flag so CI and local builds match.
 ## D22: wrapping uses monospace column math, not text measurement (2026-10-27)
 The viewer must stay a fixed-row-height virtual list (that is what keeps 50 MB at ~130 MB RAM and smooth). So wrapping is done by splitting rows at N characters in a precomputed row index (`at_core::lines`), where N comes from window width / estimated character width. Each row stores its logical line number, with a continuation flag, so numbers never shift. Trade-off: wide glyphs (CJK/emoji) can overflow; if the width estimate is off on some OS, we measure the real glyph advance via GPUI's text system.
 Sticky gutter: horizontal scroll is handled by the app (not the list), so the gutter is simply not shifted.
+
+## D23: key/value tables are one `Input` pair per row (2026-10-27)
+Each row owns two `InputState` entities (key, value) — simple and fully editable. At send time rows are read into `KeyValue`s (disabled/empty-key rows are ignored by `at_core::build`). Cost: 2 small entities per row; fine for tens of rows. If someone pastes 1,000 headers we'll switch to a virtualized table.
+Tabs are plain buttons (primary = selected) rather than gpui-component's TabBar, to keep the API surface small until styling is a priority.

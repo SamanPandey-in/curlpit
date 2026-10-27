@@ -3,14 +3,15 @@
 use std::sync::Arc;
 
 use at_core::lines::{build_rows, count_chars, RowIndex, CONT, MAX_ROW_CHARS};
-use at_core::{build, pretty::pretty_json, Body, Method, Request, Variables};
+use at_core::{build, pretty::pretty_json, Body, KeyValue, Method, Request, Variables};
 use at_http::{send, EngineConfig, HttpError, ResponseBody};
 use gpui::{
     div, prelude::*, px, rgb, size, uniform_list, App, Application, Bounds, Context, Entity, Hsla,
-    ScrollWheelEvent, Window, WindowBounds, WindowOptions,
+    ScrollWheelEvent, Subscription, Window, WindowBounds, WindowOptions,
 };
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{Input, InputState};
+use gpui_component::checkbox::Checkbox;
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Root};
 use tokio_util::sync::CancellationToken;
 
@@ -82,6 +83,52 @@ fn human(bytes: u64) -> String {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum ReqTab {
+    Params,
+    Headers,
+    Body,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ResTab {
+    Body,
+    Headers,
+}
+
+#[derive(Clone, Copy)]
+enum Which {
+    Params,
+    Headers,
+}
+
+/// One editable key/value row (params or headers).
+struct KvRow {
+    enabled: bool,
+    key: Entity<InputState>,
+    value: Entity<InputState>,
+}
+
+fn collect(rows: &[KvRow], cx: &App) -> Vec<KeyValue> {
+    rows.iter()
+        .map(|r| KeyValue {
+            key: r.key.read(cx).value().to_string(),
+            value: r.value.read(cx).value().to_string(),
+            description: String::new(),
+            enabled: r.enabled,
+        })
+        .collect()
+}
+
+fn seg_btn(id: &'static str, label: String, selected: bool) -> Button {
+    let b = Button::new(id).label(label);
+    if selected {
+        b.primary()
+    } else {
+        b
+    }
+}
+
 enum Status {
     Idle,
     Loading,
@@ -112,6 +159,12 @@ struct Workspace {
     status: Status,
     view: Option<ViewData>,
     cancel: Option<CancellationToken>,
+    params: Vec<KvRow>,
+    headers: Vec<KvRow>,
+    req_tab: ReqTab,
+    res_tab: ResTab,
+    resp_headers: Vec<(String, String)>,
+    _subs: Vec<Subscription>,
     wrap: bool,
     /// Horizontal scroll of the response text in px (0 = left edge). The gutter never moves.
     scroll_x: f32,
@@ -126,6 +179,18 @@ impl Workspace {
                 .line_number(true)
                 .default_value("{\n  \"hello\": \"world\"\n}")
         });
+        let params = vec![Self::new_row(window, cx, "hello", "world")];
+        let headers = vec![Self::new_row(window, cx, "", "")];
+        // Enter in the URL box sends (but never cancels an in-flight request).
+        let sub = cx.subscribe_in(
+            &url,
+            window,
+            |this, _state, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) && this.cancel.is_none() {
+                    this.on_send(cx);
+                }
+            },
+        );
         Self {
             rt,
             method: Method::Get,
@@ -134,9 +199,94 @@ impl Workspace {
             status: Status::Idle,
             view: None,
             cancel: None,
+            params,
+            headers,
+            req_tab: ReqTab::Params,
+            res_tab: ResTab::Body,
+            resp_headers: Vec::new(),
+            _subs: vec![sub],
             wrap: false,
             scroll_x: 0.0,
         }
+    }
+
+    fn new_row(window: &mut Window, cx: &mut Context<Self>, k: &str, v: &str) -> KvRow {
+        let key = cx.new(|cx| InputState::new(window, cx).default_value(k.to_string()));
+        let value = cx.new(|cx| InputState::new(window, cx).default_value(v.to_string()));
+        KvRow {
+            enabled: true,
+            key,
+            value,
+        }
+    }
+
+    fn rows_mut(&mut self, which: Which) -> &mut Vec<KvRow> {
+        match which {
+            Which::Params => &mut self.params,
+            Which::Headers => &mut self.headers,
+        }
+    }
+
+    fn render_kv(&self, which: Which, cx: &Context<Self>) -> impl IntoElement {
+        let (rows, en_id, del_id, add_id) = match which {
+            Which::Params => (&self.params, "p-en", "p-del", "p-add"),
+            Which::Headers => (&self.headers, "h-en", "h-del", "h-add"),
+        };
+        let muted = cx.theme().muted_foreground;
+        let mut col = div().flex().flex_col().gap_1().p_2().child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .text_color(muted)
+                .child(div().w(px(24.)).flex_none())
+                .child(div().flex_1().child("Key"))
+                .child(div().flex_1().child("Value"))
+                .child(div().w(px(36.)).flex_none()),
+        );
+        for (ix, row) in rows.iter().enumerate() {
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div().w(px(24.)).flex_none().child(
+                            Checkbox::new((en_id, ix))
+                                .checked(row.enabled)
+                                .on_click(cx.listener(move |this, checked: &bool, _window, cx| {
+                                    if let Some(r) = this.rows_mut(which).get_mut(ix) {
+                                        r.enabled = *checked;
+                                    }
+                                    cx.notify();
+                                })),
+                        ),
+                    )
+                    .child(div().flex_1().child(Input::new(&row.key)))
+                    .child(div().flex_1().child(Input::new(&row.value)))
+                    .child(div().w(px(36.)).flex_none().child(
+                        Button::new((del_id, ix)).label("✕").on_click(cx.listener(
+                            move |this, _ev, _window, cx| {
+                                let rows = this.rows_mut(which);
+                                if ix < rows.len() {
+                                    rows.remove(ix);
+                                }
+                                cx.notify();
+                            },
+                        )),
+                    )),
+            );
+        }
+        col.child(
+            div().child(Button::new(add_id).label("+ Add").on_click(cx.listener(
+                move |this, _ev, window, cx| {
+                    let row = Self::new_row(window, cx, "", "");
+                    this.rows_mut(which).push(row);
+                    cx.notify();
+                },
+            ))),
+        )
     }
 
     fn set_view(&mut self, data: Vec<u8>) {
@@ -174,6 +324,8 @@ impl Workspace {
             url,
             ..Default::default()
         };
+        req.params = collect(&self.params, cx);
+        req.headers = collect(&self.headers, cx);
         if has_body(self.method) {
             let text = self.body.read(cx).value().to_string();
             if !text.trim().is_empty() {
@@ -217,6 +369,9 @@ impl Workspace {
     fn apply(&mut self, result: Result<at_http::HttpResponse, HttpError>) {
         match result {
             Ok(resp) => {
+                let mut hs = resp.headers.clone();
+                hs.sort_by(|a, b| a.0.cmp(&b.0));
+                self.resp_headers = hs;
                 let ct = resp
                     .headers
                     .iter()
@@ -316,12 +471,75 @@ impl Render for Workspace {
                     .on_click(cx.listener(|this, _ev, _window, cx| this.on_send(cx))),
             );
 
-        let body_editor = has_body(self.method).then(|| {
+        // ---- request editor: tabs + panel ----
+        let pcount = self
+            .params
+            .iter()
+            .filter(|r| r.enabled && !r.key.read(cx).value().is_empty())
+            .count();
+        let hcount = self
+            .headers
+            .iter()
+            .filter(|r| r.enabled && !r.key.read(cx).value().is_empty())
+            .count();
+        let req_tabs = div()
+            .flex()
+            .flex_row()
+            .gap_1()
+            .px_2()
+            .child(
+                seg_btn(
+                    "t-params",
+                    format!("Params ({pcount})"),
+                    self.req_tab == ReqTab::Params,
+                )
+                .on_click(cx.listener(|this, _ev, _window, cx| {
+                    this.req_tab = ReqTab::Params;
+                    cx.notify();
+                })),
+            )
+            .child(
+                seg_btn(
+                    "t-headers",
+                    format!("Headers ({hcount})"),
+                    self.req_tab == ReqTab::Headers,
+                )
+                .on_click(cx.listener(|this, _ev, _window, cx| {
+                    this.req_tab = ReqTab::Headers;
+                    cx.notify();
+                })),
+            )
+            .child(
+                seg_btn("t-body", "Body".to_string(), self.req_tab == ReqTab::Body).on_click(
+                    cx.listener(|this, _ev, _window, cx| {
+                        this.req_tab = ReqTab::Body;
+                        cx.notify();
+                    }),
+                ),
+            );
+        let req_panel =
             div()
-                .h(px(160.))
-                .px_2()
-                .child(Input::new(&self.body).h_full())
-        });
+                .id("req-panel")
+                .h(px(210.))
+                .overflow_y_scroll()
+                .child(match self.req_tab {
+                    ReqTab::Params => self.render_kv(Which::Params, cx).into_any_element(),
+                    ReqTab::Headers => self.render_kv(Which::Headers, cx).into_any_element(),
+                    ReqTab::Body => div()
+                        .p_2()
+                        .h_full()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .children((!has_body(self.method)).then(|| {
+                            div().text_color(muted).child(format!(
+                                "{} requests don't send a body.",
+                                self.method.as_str()
+                            ))
+                        }))
+                        .child(div().flex_1().child(Input::new(&self.body).h_full()))
+                        .into_any_element(),
+                });
 
         let (status_text, status_col): (String, Hsla) = match &self.status {
             Status::Idle => ("Ready".into(), muted),
@@ -339,7 +557,7 @@ impl Render for Workspace {
         };
 
         // The wrap toggle appears only when text overflows the window (or while wrap is on).
-        let wrap_btn = (self.wrap || overflow).then(|| {
+        let wrap_btn = (self.res_tab == ResTab::Body && (self.wrap || overflow)).then(|| {
             Button::new("wrap")
                 .label(if self.wrap { "Wrap: on" } else { "Wrap: off" })
                 .on_click(cx.listener(|this, _ev, _window, cx| {
@@ -362,7 +580,31 @@ impl Render for Workspace {
             .px_3()
             .py_1()
             .child(div().text_color(status_col).child(status_text))
-            .children(wrap_btn);
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_1()
+                    .child(
+                        seg_btn("r-body", "Body".to_string(), self.res_tab == ResTab::Body)
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                this.res_tab = ResTab::Body;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        seg_btn(
+                            "r-headers",
+                            format!("Headers ({})", self.resp_headers.len()),
+                            self.res_tab == ResTab::Headers,
+                        )
+                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                            this.res_tab = ResTab::Headers;
+                            cx.notify();
+                        })),
+                    )
+                    .children(wrap_btn),
+            );
 
         let viewer = match &self.view {
             Some(v) => {
@@ -432,6 +674,33 @@ impl Render for Workspace {
                 .into_any_element(),
         };
 
+        let resp_area = match self.res_tab {
+            ResTab::Body => viewer,
+            ResTab::Headers => div()
+                .id("resp-headers")
+                .size_full()
+                .overflow_y_scroll()
+                .p_2()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(self.resp_headers.iter().map(|(k, v)| {
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_3()
+                        .child(
+                            div()
+                                .w(px(240.))
+                                .flex_none()
+                                .text_color(muted)
+                                .child(k.clone()),
+                        )
+                        .child(div().flex_1().child(v.clone()))
+                }))
+                .into_any_element(),
+        };
+
         div()
             .size_full()
             .flex()
@@ -439,7 +708,8 @@ impl Render for Workspace {
             .bg(bg)
             .text_color(fg)
             .child(top)
-            .children(body_editor)
+            .child(req_tabs)
+            .child(req_panel)
             .child(status_row)
             .child(
                 div()
@@ -449,7 +719,7 @@ impl Render for Workspace {
                     .text_size(px(13.))
                     // horizontal scrolling is ours (so the gutter can stay put); vertical is the list's
                     .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, cx| {
-                        if this.wrap {
+                        if this.wrap || this.res_tab != ResTab::Body {
                             return;
                         }
                         let d = ev.delta.pixel_delta(px(18.));
@@ -464,7 +734,7 @@ impl Render for Workspace {
                         this.scroll_x = (this.scroll_x - dx).clamp(0.0, max);
                         cx.notify();
                     }))
-                    .child(viewer),
+                    .child(resp_area),
             )
     }
 }
