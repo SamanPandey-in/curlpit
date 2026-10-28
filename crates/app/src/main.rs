@@ -1,13 +1,16 @@
 //! API Tester — Phase 2a: one window, send a request, read the response.
 //! Network work runs on its own tokio threads; results come back over a channel.
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use at_core::lines::{build_rows, count_chars, RowIndex, CONT, MAX_ROW_CHARS};
 use at_core::{build, pretty::pretty_json, Body, KeyValue, Method, Request, Variables};
 use at_http::{send, EngineConfig, HttpError, ResponseBody};
+use at_store::{Node, Store};
 use gpui::{
-    div, prelude::*, px, rgb, size, uniform_list, App, Application, Bounds, Context, Entity, Hsla,
-    ScrollWheelEvent, Subscription, Window, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, rgb, size, uniform_list, App, Application, Bounds, Context,
+    Entity, FocusHandle, Hsla, KeyBinding, ScrollWheelEvent, Subscription, Window, WindowBounds,
+    WindowOptions,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
@@ -17,6 +20,8 @@ use tokio_util::sync::CancellationToken;
 
 /// Width of the sticky line-number gutter (px).
 const GUTTER: f32 = 76.0;
+
+actions!(api_tester, [SendRequest, SaveRequest]);
 
 fn mono() -> &'static str {
     if cfg!(target_os = "macos") {
@@ -129,8 +134,64 @@ fn seg_btn(id: &'static str, label: String, selected: bool) -> Button {
     }
 }
 
+#[derive(Clone)]
+enum ItemKind {
+    Collection,
+    Folder,
+    Request,
+    Broken(String),
+}
+
+/// One row of the flattened sidebar tree.
+#[derive(Clone)]
+struct SidebarItem {
+    depth: usize,
+    label: String,
+    kind: ItemKind,
+    /// Collection directory name this item belongs to.
+    col: String,
+    /// Collection dir, folder dir, or request file.
+    path: PathBuf,
+}
+
+fn push_nodes(items: &mut Vec<SidebarItem>, nodes: &[Node], depth: usize, col: &str) {
+    for n in nodes {
+        match n {
+            Node::Folder {
+                name,
+                path,
+                children,
+            } => {
+                items.push(SidebarItem {
+                    depth,
+                    label: name.clone(),
+                    kind: ItemKind::Folder,
+                    col: col.into(),
+                    path: path.clone(),
+                });
+                push_nodes(items, children, depth + 1, col);
+            }
+            Node::Request { name, path } => items.push(SidebarItem {
+                depth,
+                label: name.clone(),
+                kind: ItemKind::Request,
+                col: col.into(),
+                path: path.clone(),
+            }),
+            Node::Broken { name, path, error } => items.push(SidebarItem {
+                depth,
+                label: name.clone(),
+                kind: ItemKind::Broken(error.clone()),
+                col: col.into(),
+                path: path.clone(),
+            }),
+        }
+    }
+}
+
 enum Status {
     Idle,
+    Info(String),
     Loading,
     Done {
         code: u16,
@@ -165,6 +226,14 @@ struct Workspace {
     res_tab: ResTab,
     resp_headers: Vec<(String, String)>,
     _subs: Vec<Subscription>,
+    name: Entity<InputState>,
+    store: Option<Store>,
+    items: Vec<SidebarItem>,
+    current_col: Option<String>,
+    current_path: Option<PathBuf>,
+    save_dir: Option<PathBuf>,
+    focus: FocusHandle,
+    focused_once: bool,
     wrap: bool,
     /// Horizontal scroll of the response text in px (0 = left edge). The gutter never moves.
     scroll_x: f32,
@@ -179,6 +248,11 @@ impl Workspace {
                 .line_number(true)
                 .default_value("{\n  \"hello\": \"world\"\n}")
         });
+        let name = cx.new(|cx| InputState::new(window, cx).default_value("New request"));
+        let (store, store_err) = match Store::open_default() {
+            Ok(s) => (Some(s), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
         let params = vec![Self::new_row(window, cx, "hello", "world")];
         let headers = vec![Self::new_row(window, cx, "", "")];
         // Enter in the URL box sends (but never cancels an in-flight request).
@@ -191,12 +265,12 @@ impl Workspace {
                 }
             },
         );
-        Self {
+        let mut me = Self {
             rt,
             method: Method::Get,
             url,
             body,
-            status: Status::Idle,
+            status: store_err.map(Status::Error).unwrap_or(Status::Idle),
             view: None,
             cancel: None,
             params,
@@ -205,9 +279,19 @@ impl Workspace {
             res_tab: ResTab::Body,
             resp_headers: Vec::new(),
             _subs: vec![sub],
+            name,
+            store,
+            items: Vec::new(),
+            current_col: None,
+            current_path: None,
+            save_dir: None,
+            focus: cx.focus_handle(),
+            focused_once: false,
             wrap: false,
             scroll_x: 0.0,
-        }
+        };
+        me.refresh_sidebar();
+        me
     }
 
     fn new_row(window: &mut Window, cx: &mut Context<Self>, k: &str, v: &str) -> KvRow {
@@ -289,6 +373,176 @@ impl Workspace {
         )
     }
 
+    fn current_request(&self, cx: &App) -> Request {
+        let mut req = Request {
+            name: self.name.read(cx).value().to_string(),
+            method: self.method,
+            url: self.url.read(cx).value().to_string().trim().to_string(),
+            ..Default::default()
+        };
+        req.params = collect(&self.params, cx);
+        req.headers = collect(&self.headers, cx);
+        let text = self.body.read(cx).value().to_string();
+        if !text.trim().is_empty() {
+            req.body = Body::Json { raw: text };
+        }
+        req
+    }
+
+    fn apply_request(&mut self, req: Request, window: &mut Window, cx: &mut Context<Self>) {
+        self.method = req.method;
+        let url = req.url.clone();
+        self.url.update(cx, |s, cx| s.set_value(url, window, cx));
+        let name = req.name.clone();
+        self.name.update(cx, |s, cx| s.set_value(name, window, cx));
+        let body_text = match &req.body {
+            Body::Json { raw } | Body::Text { raw } | Body::Xml { raw } | Body::Html { raw } => {
+                raw.clone()
+            }
+            _ => String::new(),
+        };
+        self.body
+            .update(cx, |s, cx| s.set_value(body_text, window, cx));
+        let mut params: Vec<KvRow> = req
+            .params
+            .iter()
+            .map(|kv| {
+                let mut r = Self::new_row(window, cx, &kv.key, &kv.value);
+                r.enabled = kv.enabled;
+                r
+            })
+            .collect();
+        if params.is_empty() {
+            params.push(Self::new_row(window, cx, "", ""));
+        }
+        let mut headers: Vec<KvRow> = req
+            .headers
+            .iter()
+            .map(|kv| {
+                let mut r = Self::new_row(window, cx, &kv.key, &kv.value);
+                r.enabled = kv.enabled;
+                r
+            })
+            .collect();
+        if headers.is_empty() {
+            headers.push(Self::new_row(window, cx, "", ""));
+        }
+        self.params = params;
+        self.headers = headers;
+    }
+
+    fn refresh_sidebar(&mut self) {
+        self.items.clear();
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        match store.load_all() {
+            Ok(trees) => {
+                for t in &trees {
+                    self.items.push(SidebarItem {
+                        depth: 0,
+                        label: t.name.clone(),
+                        kind: ItemKind::Collection,
+                        col: t.dir_name.clone(),
+                        path: t.dir.clone(),
+                    });
+                    push_nodes(&mut self.items, &t.children, 1, &t.dir_name);
+                }
+            }
+            Err(e) => self.status = Status::Error(e.to_string()),
+        }
+    }
+
+    fn on_sidebar_click(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self.items.get(ix).cloned() else {
+            return;
+        };
+        match item.kind {
+            ItemKind::Collection | ItemKind::Folder => {
+                self.current_col = Some(item.col);
+                self.save_dir = Some(item.path);
+                self.current_path = None;
+                self.status = Status::Info("New requests will be saved here".into());
+            }
+            ItemKind::Broken(e) => self.status = Status::Error(e),
+            ItemKind::Request => match Store::load_request(&item.path) {
+                Ok(req) => {
+                    self.apply_request(req, window, cx);
+                    self.current_col = Some(item.col);
+                    self.save_dir = item.path.parent().map(|d| d.to_path_buf());
+                    self.current_path = Some(item.path);
+                    self.status = Status::Info("Opened".into());
+                }
+                Err(e) => self.status = Status::Error(e.to_string()),
+            },
+        }
+        cx.notify();
+    }
+
+    fn on_new_collection(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let n = self
+            .items
+            .iter()
+            .filter(|i| matches!(i.kind, ItemKind::Collection))
+            .count()
+            + 1;
+        match store.create_collection(&format!("Collection {n}")) {
+            Ok(c) => {
+                self.save_dir = Some(c.dir);
+                self.current_col = Some(c.dir_name);
+                self.current_path = None;
+                self.refresh_sidebar();
+                self.status = Status::Info("Collection created; Save puts requests in it".into());
+            }
+            Err(e) => self.status = Status::Error(e.to_string()),
+        }
+        cx.notify();
+    }
+
+    fn on_save(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(store) = self.store.clone() else {
+            self.status = Status::Error("Storage is unavailable on this system".into());
+            cx.notify();
+            return;
+        };
+        let mut req = self.current_request(cx);
+        if req.name.trim().is_empty() {
+            req.name = "Untitled request".into();
+        }
+        let dir = match (&self.current_path, &self.save_dir) {
+            (Some(p), _) => p.parent().map(|d| d.to_path_buf()),
+            (None, Some(d)) => Some(d.clone()),
+            _ => None,
+        };
+        let dir = match dir {
+            Some(d) => d,
+            None => match store.load_all() {
+                Ok(all) if !all.is_empty() => all[0].dir.clone(),
+                _ => match store.create_collection("My Collection") {
+                    Ok(c) => c.dir,
+                    Err(e) => {
+                        self.status = Status::Error(e.to_string());
+                        cx.notify();
+                        return;
+                    }
+                },
+            },
+        };
+        match Store::save_request(&dir, &req, self.current_path.as_deref()) {
+            Ok(path) => {
+                self.save_dir = path.parent().map(|d| d.to_path_buf());
+                self.status = Status::Info(format!("Saved to {}", path.display()));
+                self.current_path = Some(path);
+                self.refresh_sidebar();
+            }
+            Err(e) => self.status = Status::Error(e.to_string()),
+        }
+        cx.notify();
+    }
+
     fn set_view(&mut self, data: Vec<u8>) {
         let base = build_rows(&data, MAX_ROW_CHARS);
         let longest = base.longest_row(&data);
@@ -315,22 +569,12 @@ impl Workspace {
             token.cancel();
             return;
         }
-        let mut url = self.url.read(cx).value().to_string().trim().to_string();
-        if !url.contains("://") && !url.is_empty() {
-            url = format!("https://{url}");
+        let mut req = self.current_request(cx);
+        if !req.url.contains("://") && !req.url.is_empty() {
+            req.url = format!("https://{}", req.url);
         }
-        let mut req = Request {
-            method: self.method,
-            url,
-            ..Default::default()
-        };
-        req.params = collect(&self.params, cx);
-        req.headers = collect(&self.headers, cx);
-        if has_body(self.method) {
-            let text = self.body.read(cx).value().to_string();
-            if !text.trim().is_empty() {
-                req.body = Body::Json { raw: text };
-            }
+        if !has_body(self.method) {
+            req.body = Body::None;
         }
         let built = match build(&req, &Variables::default()) {
             Ok(b) => b,
@@ -414,6 +658,10 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.focused_once {
+            window.focus(&self.focus);
+            self.focused_once = true;
+        }
         // ---- viewer geometry (depends on the current window width) ----
         let avail = avail_width(window);
         let cols = (((avail / char_w()).floor() as usize).saturating_sub(1)).max(10);
@@ -441,11 +689,12 @@ impl Render for Workspace {
         let scroll_x = if self.wrap { 0.0 } else { self.scroll_x };
 
         let theme = cx.theme();
-        let (bg, fg, muted, border) = (
+        let (bg, fg, muted, border, accent) = (
             theme.background,
             theme.foreground,
             theme.muted_foreground,
             theme.border,
+            theme.accent,
         );
         let in_flight = self.cancel.is_some();
 
@@ -455,6 +704,7 @@ impl Render for Workspace {
             .items_center()
             .gap_2()
             .p_2()
+            .child(div().w(px(180.)).flex_none().child(Input::new(&self.name)))
             .child(
                 Button::new("method")
                     .label(self.method.as_str())
@@ -469,6 +719,11 @@ impl Render for Workspace {
                     .primary()
                     .label(if in_flight { "Cancel" } else { "Send" })
                     .on_click(cx.listener(|this, _ev, _window, cx| this.on_send(cx))),
+            )
+            .child(
+                Button::new("save")
+                    .label("Save")
+                    .on_click(cx.listener(|this, _ev, window, cx| this.on_save(window, cx))),
             );
 
         // ---- request editor: tabs + panel ----
@@ -544,6 +799,7 @@ impl Render for Workspace {
         let (status_text, status_col): (String, Hsla) = match &self.status {
             Status::Idle => ("Ready".into(), muted),
             Status::Loading => ("Sending…".into(), muted),
+            Status::Info(m) => (m.clone(), muted),
             Status::Done {
                 code,
                 text,
@@ -701,12 +957,77 @@ impl Render for Workspace {
                 .into_any_element(),
         };
 
-        div()
-            .size_full()
+        let mut side_list = div()
+            .id("sidebar-list")
+            .flex_1()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if self.items.is_empty() {
+            side_list = side_list.child(
+                div()
+                    .p_2()
+                    .text_color(muted)
+                    .child("No collections yet. Press + or just Save a request."),
+            );
+        }
+        for (ix, item) in self.items.iter().enumerate() {
+            let selected = match item.kind {
+                ItemKind::Request => self.current_path.as_ref() == Some(&item.path),
+                ItemKind::Collection | ItemKind::Folder => {
+                    self.current_path.is_none() && self.save_dir.as_ref() == Some(&item.path)
+                }
+                ItemKind::Broken(_) => false,
+            };
+            let (prefix, color) = match item.kind {
+                ItemKind::Collection => ("▾ ", fg),
+                ItemKind::Folder => ("▸ ", fg),
+                ItemKind::Request => ("", fg),
+                ItemKind::Broken(_) => ("⚠ ", c(0xf38ba8)),
+            };
+            side_list = side_list.child(
+                div()
+                    .id(("side", ix))
+                    .w_full()
+                    .py_1()
+                    .pl(px(8.0 + item.depth as f32 * 14.0))
+                    .pr_2()
+                    .text_color(color)
+                    .cursor_pointer()
+                    .bg(if selected { accent } else { bg })
+                    .child(format!("{prefix}{}", item.label))
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        this.on_sidebar_click(ix, window, cx)
+                    })),
+            );
+        }
+        let sidebar = div()
+            .w(px(260.))
+            .flex_none()
+            .h_full()
             .flex()
             .flex_col()
-            .bg(bg)
-            .text_color(fg)
+            .border_r_1()
+            .border_color(border)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .p_2()
+                    .child(div().text_color(muted).child("COLLECTIONS"))
+                    .child(Button::new("new-col").label("+").on_click(
+                        cx.listener(|this, _ev, _window, cx| this.on_new_collection(cx)),
+                    )),
+            )
+            .child(side_list);
+
+        let main_col = div()
+            .flex_1()
+            .h_full()
+            .flex()
+            .flex_col()
             .child(top)
             .child(req_tabs)
             .child(req_panel)
@@ -735,7 +1056,20 @@ impl Render for Workspace {
                         cx.notify();
                     }))
                     .child(resp_area),
-            )
+            );
+
+        div()
+            .size_full()
+            .flex()
+            .flex_row()
+            .bg(bg)
+            .text_color(fg)
+            .key_context("Workspace")
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &SendRequest, _window, cx| this.on_send(cx)))
+            .on_action(cx.listener(|this, _: &SaveRequest, window, cx| this.on_save(window, cx)))
+            .child(sidebar)
+            .child(main_col)
     }
 }
 
@@ -750,6 +1084,14 @@ fn main() {
 
     Application::new().run(move |cx: &mut App| {
         gpui_component::init(cx);
+        #[cfg(target_os = "macos")]
+        let (send_key, save_key) = ("cmd-enter", "cmd-s");
+        #[cfg(not(target_os = "macos"))]
+        let (send_key, save_key) = ("ctrl-enter", "ctrl-s");
+        cx.bind_keys([
+            KeyBinding::new(send_key, SendRequest, None),
+            KeyBinding::new(save_key, SaveRequest, None),
+        ]);
         let bounds = Bounds::centered(None, size(px(1100.), px(760.)), cx);
         cx.open_window(
             WindowOptions {

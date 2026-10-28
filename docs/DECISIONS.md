@@ -52,3 +52,10 @@ Sticky gutter: horizontal scroll is handled by the app (not the list), so the gu
 ## D23: key/value tables are one `Input` pair per row (2026-10-27)
 Each row owns two `InputState` entities (key, value) — simple and fully editable. At send time rows are read into `KeyValue`s (disabled/empty-key rows are ignored by `at_core::build`). Cost: 2 small entities per row; fine for tens of rows. If someone pastes 1,000 headers we'll switch to a virtualized table.
 Tabs are plain buttons (primary = selected) rather than gpui-component's TabBar, to keep the API surface small until styling is a priority.
+
+## D24: storage format and behaviour (2026-10-27)
+- **TOML, one file per request** (resolves open question 4): readable, diff-friendly, hand-editable. Each file has `schema_version`; newer-than-supported files are refused (never overwritten), unreadable files appear as ⚠ entries.
+- File name = slug of the request name; collisions get `-2`, `-3`; renaming moves the file. A request keeps no id in its filename, so git diffs stay clean.
+- Atomic writes: temp file in the same directory, fsync, rename.
+- Data dir: OS standard location via `directories`; `API_TESTER_DATA_DIR` overrides it (testing, portable use).
+- Sidebar is a plain scrolling list for now; it becomes a virtualized list before the 5,000-request target (NFR-PERF-07).

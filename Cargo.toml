@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/http", "crates/demo", "crates/app"]
+members = ["crates/core", "crates/http", "crates/demo", "crates/store", "crates/app"]
 # CI and plain `cargo test` skip the GUI crate (slow to build); build it with `-p at-app`.
-default-members = ["crates/core", "crates/http", "crates/demo"]
+default-members = ["crates/core", "crates/http", "crates/demo", "crates/store"]
 
 [workspace.package]
 version = "0.0.1"
