@@ -39,7 +39,7 @@ pub enum StoreError {
     NoDataDir,
 }
 
-fn io<'a>(path: &'a Path) -> impl FnOnce(std::io::Error) -> StoreError + 'a {
+fn io(path: &Path) -> impl FnOnce(std::io::Error) -> StoreError + '_ {
     move |source| StoreError::Io {
         path: path.to_path_buf(),
         source,

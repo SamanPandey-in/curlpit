@@ -3,7 +3,7 @@
 
 fn newline(out: &mut Vec<u8>, depth: usize, indent: usize) {
     out.push(b'\n');
-    out.extend(std::iter::repeat(b' ').take(depth * indent));
+    out.resize(out.len() + depth * indent, b' ');
 }
 
 pub fn pretty_json(input: &[u8], indent: usize) -> Vec<u8> {
