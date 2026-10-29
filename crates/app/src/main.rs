@@ -4,13 +4,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use at_core::lines::{build_rows, count_chars, RowIndex, CONT, MAX_ROW_CHARS};
-use at_core::{build, pretty::pretty_json, Body, KeyValue, Method, Request, Variables};
+use at_core::{
+    build, pretty::pretty_json, to_map, Body, EnvVar, Environment, KeyValue, Method, Request,
+    Variables,
+};
 use at_http::{send, EngineConfig, HttpError, ResponseBody};
-use at_store::{Node, Store};
+use at_store::{Node, Settings, Store};
 use gpui::{
-    actions, div, prelude::*, px, rgb, size, uniform_list, App, Application, Bounds, Context,
-    Entity, FocusHandle, Hsla, KeyBinding, ScrollWheelEvent, Subscription, Window, WindowBounds,
-    WindowOptions,
+    actions, div, prelude::*, px, rgb, size, uniform_list, App, Application, Bounds, ClipboardItem,
+    Context, Entity, FocusHandle, Hsla, KeyBinding, ScrollWheelEvent, Subscription, Window,
+    WindowBounds, WindowOptions,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
@@ -114,15 +117,65 @@ struct KvRow {
     value: Entity<InputState>,
 }
 
+/// Rows -> key/values. Completely empty rows (the spare row at the bottom) are skipped so they
+/// never get written into saved files.
 fn collect(rows: &[KvRow], cx: &App) -> Vec<KeyValue> {
     rows.iter()
-        .map(|r| KeyValue {
-            key: r.key.read(cx).value().to_string(),
-            value: r.value.read(cx).value().to_string(),
-            description: String::new(),
-            enabled: r.enabled,
+        .filter_map(|r| {
+            let key = r.key.read(cx).value().to_string();
+            let value = r.value.read(cx).value().to_string();
+            if key.trim().is_empty() && value.is_empty() {
+                return None;
+            }
+            Some(KeyValue {
+                key,
+                value,
+                description: String::new(),
+                enabled: r.enabled,
+            })
         })
         .collect()
+}
+
+/// One editable environment/global variable row.
+struct EnvRow {
+    enabled: bool,
+    secret: bool,
+    /// Secret values are masked unless the user clicked Show.
+    revealed: bool,
+    key: Entity<InputState>,
+    value: Entity<InputState>,
+}
+
+/// Variables from the editor rows; rows without a key are skipped.
+fn collect_env(rows: &[EnvRow], cx: &App) -> Vec<EnvVar> {
+    rows.iter()
+        .filter_map(|r| {
+            let key = r.key.read(cx).value().trim().to_string();
+            if key.is_empty() {
+                return None;
+            }
+            Some(EnvVar {
+                key,
+                value: r.value.read(cx).value().to_string(),
+                secret: r.secret,
+                enabled: r.enabled,
+            })
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum MainView {
+    Request,
+    Environments,
+}
+
+/// What the environments page is editing.
+#[derive(Clone, Copy, PartialEq)]
+enum Scope {
+    Globals,
+    Env(usize),
 }
 
 fn seg_btn(id: &'static str, label: String, selected: bool) -> Button {
@@ -237,6 +290,19 @@ struct Workspace {
     wrap: bool,
     /// Horizontal scroll of the response text in px (0 = left edge). The gutter never moves.
     scroll_x: f32,
+    // ---- environments (Phase 3b) ----
+    main_view: MainView,
+    globals: Vec<EnvVar>,
+    /// Environments with the file each one lives in.
+    envs: Vec<(Environment, PathBuf)>,
+    active_env: Option<usize>,
+    env_scope: Scope,
+    env_name: Entity<InputState>,
+    env_rows: Vec<EnvRow>,
+    confirm_delete: bool,
+    /// Shown next to the status, e.g. unresolved `{{variables}}` in the last request.
+    warning: Option<String>,
+    copied: bool,
 }
 
 impl Workspace {
@@ -249,6 +315,7 @@ impl Workspace {
                 .default_value("{\n  \"hello\": \"world\"\n}")
         });
         let name = cx.new(|cx| InputState::new(window, cx).default_value("New request"));
+        let env_name = cx.new(|cx| InputState::new(window, cx));
         let (store, store_err) = match Store::open_default() {
             Ok(s) => (Some(s), None),
             Err(e) => (None, Some(e.to_string())),
@@ -289,8 +356,20 @@ impl Workspace {
             focused_once: false,
             wrap: false,
             scroll_x: 0.0,
+            main_view: MainView::Request,
+            globals: Vec::new(),
+            envs: Vec::new(),
+            active_env: None,
+            env_scope: Scope::Globals,
+            env_name,
+            env_rows: Vec::new(),
+            confirm_delete: false,
+            warning: None,
+            copied: false,
         };
         me.refresh_sidebar();
+        me.reload_envs();
+        me.load_scope(Scope::Globals, window, cx);
         me
     }
 
@@ -309,6 +388,523 @@ impl Workspace {
             Which::Params => &mut self.params,
             Which::Headers => &mut self.headers,
         }
+    }
+
+    // ---------------- environments (FR-ENV-01..05) ----------------
+
+    /// Variables in effect: globals, overridden by the active environment.
+    fn variables(&self) -> Variables {
+        let environment = self
+            .active_env
+            .and_then(|i| self.envs.get(i))
+            .map(|(e, _)| to_map(&e.variables))
+            .unwrap_or_default();
+        Variables {
+            global: to_map(&self.globals),
+            environment,
+            ..Default::default()
+        }
+    }
+
+    fn reload_envs(&mut self) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        match store.load_globals() {
+            Ok(g) => self.globals = g,
+            Err(e) => self.status = Status::Error(format!("Global variables not loaded: {e}")),
+        }
+        self.envs = store
+            .list_environments()
+            .into_iter()
+            .map(|e| (e.env, e.path))
+            .collect();
+        let want = store.load_settings().active_environment;
+        self.active_env = want.and_then(|n| self.envs.iter().position(|(e, _)| e.name == n));
+    }
+
+    fn persist_active(&mut self) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let settings = Settings {
+            active_environment: self
+                .active_env
+                .and_then(|i| self.envs.get(i))
+                .map(|(e, _)| e.name.clone()),
+            ..Default::default()
+        };
+        if let Err(e) = store.save_settings(&settings) {
+            self.status = Status::Error(e.to_string());
+        }
+    }
+
+    /// Top-bar picker: none -> first environment -> ... -> none.
+    fn cycle_env(&mut self, cx: &mut Context<Self>) {
+        self.active_env = match self.active_env {
+            None if !self.envs.is_empty() => Some(0),
+            Some(i) if i + 1 < self.envs.len() => Some(i + 1),
+            _ => None,
+        };
+        self.persist_active();
+        cx.notify();
+    }
+
+    fn new_env_row(window: &mut Window, cx: &mut Context<Self>, v: &EnvVar) -> EnvRow {
+        let key = cx.new(|cx| InputState::new(window, cx).default_value(v.key.clone()));
+        let secret = v.secret;
+        let value = cx.new(|cx| {
+            let s = InputState::new(window, cx).default_value(v.value.clone());
+            if secret {
+                s.masked(true)
+            } else {
+                s
+            }
+        });
+        EnvRow {
+            enabled: v.enabled,
+            secret,
+            revealed: false,
+            key,
+            value,
+        }
+    }
+
+    /// Fill the editor with the saved variables of `scope` (plus one spare empty row).
+    fn load_scope(&mut self, scope: Scope, window: &mut Window, cx: &mut Context<Self>) {
+        let (name, vars) = match scope {
+            Scope::Globals => (String::new(), self.globals.clone()),
+            Scope::Env(ix) => match self.envs.get(ix) {
+                Some((e, _)) => (e.name.clone(), e.variables.clone()),
+                None => (String::new(), Vec::new()),
+            },
+        };
+        let mut rows: Vec<EnvRow> = vars
+            .iter()
+            .map(|v| Self::new_env_row(window, cx, v))
+            .collect();
+        rows.push(Self::new_env_row(window, cx, &EnvVar::new("", "")));
+        self.env_rows = rows;
+        self.env_name
+            .update(cx, |s, cx| s.set_value(name, window, cx));
+        self.env_scope = scope;
+        self.confirm_delete = false;
+    }
+
+    fn env_has_changes(&self, cx: &App) -> bool {
+        let vars = collect_env(&self.env_rows, cx);
+        match self.env_scope {
+            Scope::Globals => vars != self.globals,
+            Scope::Env(ix) => match self.envs.get(ix) {
+                Some((e, _)) => {
+                    vars != e.variables || self.env_name.read(cx).value().trim() != e.name
+                }
+                None => false,
+            },
+        }
+    }
+
+    /// Save what the editor shows. Returns false (with the reason in the status) on failure.
+    fn save_env_scope(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(store) = self.store.clone() else {
+            self.status = Status::Error("Storage is unavailable on this system".into());
+            return false;
+        };
+        let vars = collect_env(&self.env_rows, cx);
+        match self.env_scope {
+            Scope::Globals => match store.save_globals(&vars) {
+                Ok(()) => {
+                    self.globals = vars;
+                    self.status = Status::Info("Global variables saved".into());
+                    true
+                }
+                Err(e) => {
+                    self.status = Status::Error(e.to_string());
+                    false
+                }
+            },
+            Scope::Env(ix) => {
+                let name = self.env_name.read(cx).value().trim().to_string();
+                if name.is_empty() {
+                    self.status = Status::Error("Give the environment a name".into());
+                    return false;
+                }
+                if self
+                    .envs
+                    .iter()
+                    .enumerate()
+                    .any(|(i, (e, _))| i != ix && e.name.eq_ignore_ascii_case(&name))
+                {
+                    self.status =
+                        Status::Error(format!("An environment named \"{name}\" already exists"));
+                    return false;
+                }
+                let old = self.envs.get(ix).map(|(_, p)| p.clone());
+                let env = Environment {
+                    name,
+                    variables: vars,
+                };
+                match store.save_environment(&env, old.as_deref()) {
+                    Ok(path) => {
+                        if ix < self.envs.len() {
+                            self.envs[ix] = (env, path);
+                        }
+                        self.persist_active();
+                        self.status = Status::Info("Environment saved".into());
+                        true
+                    }
+                    Err(e) => {
+                        self.status = Status::Error(e.to_string());
+                        false
+                    }
+                }
+            }
+        }
+    }
+
+    fn select_scope(&mut self, scope: Scope, window: &mut Window, cx: &mut Context<Self>) {
+        if self.env_scope == scope {
+            return;
+        }
+        // Switching never loses edits: save first; if that fails, stay where we are.
+        if self.env_has_changes(cx) && !self.save_env_scope(cx) {
+            cx.notify();
+            return;
+        }
+        self.load_scope(scope, window, cx);
+        cx.notify();
+    }
+
+    fn open_envs(&mut self, cx: &mut Context<Self>) {
+        self.main_view = MainView::Environments;
+        cx.notify();
+    }
+
+    fn close_envs(&mut self, cx: &mut Context<Self>) {
+        if self.env_has_changes(cx) && !self.save_env_scope(cx) {
+            cx.notify();
+            return;
+        }
+        self.main_view = MainView::Request;
+        cx.notify();
+    }
+
+    fn on_env_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.env_has_changes(cx) && !self.save_env_scope(cx) {
+            cx.notify();
+            return;
+        }
+        let Some(store) = self.store.clone() else {
+            self.status = Status::Error("Storage is unavailable on this system".into());
+            cx.notify();
+            return;
+        };
+        let mut n = self.envs.len() + 1;
+        let name = loop {
+            let cand = format!("Environment {n}");
+            if !self.envs.iter().any(|(e, _)| e.name == cand) {
+                break cand;
+            }
+            n += 1;
+        };
+        let env = Environment {
+            name,
+            variables: Vec::new(),
+        };
+        match store.save_environment(&env, None) {
+            Ok(path) => {
+                self.envs.push((env, path));
+                let ix = self.envs.len() - 1;
+                self.load_scope(Scope::Env(ix), window, cx);
+                self.status =
+                    Status::Info("Environment created; rename it and add variables".into());
+            }
+            Err(e) => self.status = Status::Error(e.to_string()),
+        }
+        cx.notify();
+    }
+
+    fn on_env_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Scope::Env(ix) = self.env_scope else {
+            return;
+        };
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let Some((_, path)) = self.envs.get(ix).cloned() else {
+            return;
+        };
+        match store.delete_environment(&path) {
+            Ok(()) => {
+                self.envs.remove(ix);
+                self.active_env = match self.active_env {
+                    Some(a) if a == ix => None,
+                    Some(a) if a > ix => Some(a - 1),
+                    other => other,
+                };
+                self.persist_active();
+                self.load_scope(Scope::Globals, window, cx);
+                self.status = Status::Info("Environment deleted".into());
+            }
+            Err(e) => self.status = Status::Error(e.to_string()),
+        }
+        cx.notify();
+    }
+
+    fn render_env_page(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (muted, border) = (theme.muted_foreground, theme.border);
+
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .p_2()
+            .child(div().text_color(muted).child("ENVIRONMENTS & VARIABLES"))
+            .child(
+                Button::new("env-back")
+                    .label("← Back to requests")
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.close_envs(cx))),
+            );
+
+        // scope picker: Globals, each environment (● marks the active one), + New
+        let mut scopes = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .pb_2();
+        let g = Button::new("env-scope-g").label("Globals");
+        let g = if self.env_scope == Scope::Globals {
+            g.primary()
+        } else {
+            g
+        };
+        scopes = scopes.child(g.on_click(
+            cx.listener(|this, _ev, window, cx| this.select_scope(Scope::Globals, window, cx)),
+        ));
+        for (ix, (e, _)) in self.envs.iter().enumerate() {
+            let label = if self.active_env == Some(ix) {
+                format!("● {}", e.name)
+            } else {
+                e.name.clone()
+            };
+            let b = Button::new(("env-scope", ix)).label(label);
+            let b = if self.env_scope == Scope::Env(ix) {
+                b.primary()
+            } else {
+                b
+            };
+            scopes = scopes.child(b.on_click(cx.listener(move |this, _ev, window, cx| {
+                this.select_scope(Scope::Env(ix), window, cx)
+            })));
+        }
+        scopes = scopes.child(
+            Button::new("env-new")
+                .label("+ New")
+                .on_click(cx.listener(|this, _ev, window, cx| this.on_env_new(window, cx))),
+        );
+
+        let detail_head = match self.env_scope {
+            Scope::Globals => div()
+                .px_2()
+                .pb_2()
+                .text_color(muted)
+                .child("Globals apply everywhere. The active environment overrides them."),
+            Scope::Env(ix) => {
+                let is_active = self.active_env == Some(ix);
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .pb_2()
+                    .child(
+                        div()
+                            .w(px(240.))
+                            .flex_none()
+                            .child(Input::new(&self.env_name)),
+                    )
+                    .child(
+                        Button::new("env-active")
+                            .label(if is_active {
+                                "Active ✓ (click to deactivate)"
+                            } else {
+                                "Make active"
+                            })
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                this.active_env = if this.active_env == Some(ix) {
+                                    None
+                                } else {
+                                    Some(ix)
+                                };
+                                this.persist_active();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("env-del")
+                            .label(if self.confirm_delete {
+                                "Click again to delete"
+                            } else {
+                                "Delete"
+                            })
+                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                if this.confirm_delete {
+                                    this.confirm_delete = false;
+                                    this.on_env_delete(window, cx);
+                                } else {
+                                    this.confirm_delete = true;
+                                    cx.notify();
+                                }
+                            })),
+                    )
+            }
+        };
+
+        let mut table = div()
+            .id("env-table")
+            .flex_1()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .text_color(muted)
+                    .child(div().w(px(24.)).flex_none())
+                    .child(div().flex_1().child("Variable"))
+                    .child(div().flex_1().child("Value"))
+                    .child(div().w(px(150.)).flex_none())
+                    .child(div().w(px(36.)).flex_none()),
+            );
+        for (ix, row) in self.env_rows.iter().enumerate() {
+            let sec = Button::new(("env-sec", ix)).label("Secret");
+            let sec = if row.secret { sec.primary() } else { sec };
+            let reveal = row.secret.then(|| {
+                Button::new(("env-show", ix))
+                    .label(if row.revealed { "Hide" } else { "Show" })
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        if let Some(r) = this.env_rows.get_mut(ix) {
+                            r.revealed = !r.revealed;
+                            let masked = r.secret && !r.revealed;
+                            r.value.update(cx, |s, cx| s.set_masked(masked, window, cx));
+                        }
+                        cx.notify();
+                    }))
+            });
+            table = table.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div().w(px(24.)).flex_none().child(
+                            Checkbox::new(("env-en", ix)).checked(row.enabled).on_click(
+                                cx.listener(move |this, checked: &bool, _window, cx| {
+                                    if let Some(r) = this.env_rows.get_mut(ix) {
+                                        r.enabled = *checked;
+                                    }
+                                    cx.notify();
+                                }),
+                            ),
+                        ),
+                    )
+                    .child(div().flex_1().child(Input::new(&row.key)))
+                    .child(div().flex_1().child(Input::new(&row.value)))
+                    .child(
+                        div()
+                            .w(px(150.))
+                            .flex_none()
+                            .flex()
+                            .flex_row()
+                            .gap_1()
+                            .child(sec.on_click(cx.listener(move |this, _ev, window, cx| {
+                                if let Some(r) = this.env_rows.get_mut(ix) {
+                                    r.secret = !r.secret;
+                                    r.revealed = false;
+                                    let masked = r.secret;
+                                    r.value.update(cx, |s, cx| s.set_masked(masked, window, cx));
+                                }
+                                cx.notify();
+                            })))
+                            .children(reveal),
+                    )
+                    .child(div().w(px(36.)).flex_none().child(
+                        Button::new(("env-rm", ix)).label("✕").on_click(cx.listener(
+                            move |this, _ev, _window, cx| {
+                                if ix < this.env_rows.len() {
+                                    this.env_rows.remove(ix);
+                                }
+                                cx.notify();
+                            },
+                        )),
+                    )),
+            );
+        }
+
+        let footer = div()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .p_2()
+            .child(
+                Button::new("env-add")
+                    .label("+ Add variable")
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        let row = Self::new_env_row(window, cx, &EnvVar::new("", ""));
+                        this.env_rows.push(row);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("env-save")
+                    .primary()
+                    .label("Save")
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        this.save_env_scope(cx);
+                        cx.notify();
+                    })),
+            );
+
+        let (msg, msg_col): (String, Hsla) = match &self.status {
+            Status::Info(m) => (m.clone(), muted),
+            Status::Error(e) => (e.clone(), c(0xf38ba8)),
+            _ => (String::new(), muted),
+        };
+
+        div()
+            .flex_1()
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(scopes)
+            .child(detail_head)
+            .child(table)
+            .child(footer)
+            .child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(border)
+                    .text_color(msg_col)
+                    .child(if msg.is_empty() {
+                        "Use {{name}} in the URL, params, headers, body and auth. Secret values are masked here but stored as plain text on disk for now.".to_string()
+                    } else {
+                        msg
+                    }),
+            )
     }
 
     fn render_kv(&self, which: Which, cx: &Context<Self>) -> impl IntoElement {
@@ -503,6 +1099,12 @@ impl Workspace {
     }
 
     fn on_save(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // On the environments page, Cmd/Ctrl+S saves the variables being edited.
+        if self.main_view == MainView::Environments {
+            self.save_env_scope(cx);
+            cx.notify();
+            return;
+        }
         let Some(store) = self.store.clone() else {
             self.status = Status::Error("Storage is unavailable on this system".into());
             cx.notify();
@@ -570,20 +1172,33 @@ impl Workspace {
             return;
         }
         let mut req = self.current_request(cx);
-        if !req.url.contains("://") && !req.url.is_empty() {
+        let vars = self.variables();
+        // Decide on the default scheme after substitution, so `{{base}}/users` works when
+        // `base` already contains `https://`.
+        if !req.url.is_empty() && !vars.resolve(&req.url).text.contains("://") {
             req.url = format!("https://{}", req.url);
         }
         if !has_body(self.method) {
             req.body = Body::None;
         }
-        let built = match build(&req, &Variables::default()) {
+        let built = match build(&req, &vars) {
             Ok(b) => b,
             Err(e) => {
                 self.status = Status::Error(e.to_string());
+                self.warning = None;
                 cx.notify();
                 return;
             }
         };
+        self.warning = if built.unresolved.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "Unresolved variables: {}",
+                built.unresolved.join(", ")
+            ))
+        };
+        self.copied = false;
 
         let token = CancellationToken::new();
         self.cancel = Some(token.clone());
@@ -724,6 +1339,22 @@ impl Render for Workspace {
                 Button::new("save")
                     .label("Save")
                     .on_click(cx.listener(|this, _ev, window, cx| this.on_save(window, cx))),
+            )
+            .child(
+                Button::new("env-pick")
+                    .label(format!(
+                        "Env: {}",
+                        self.active_env
+                            .and_then(|i| self.envs.get(i))
+                            .map(|(e, _)| e.name.as_str())
+                            .unwrap_or("none")
+                    ))
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.cycle_env(cx))),
+            )
+            .child(
+                Button::new("env-manage")
+                    .label("Variables…")
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.open_envs(cx))),
             );
 
         // ---- request editor: tabs + panel ----
@@ -828,6 +1459,20 @@ impl Render for Workspace {
                 }))
         });
 
+        // Copy the (pretty-printed) response body to the clipboard (FR-RES-01).
+        let copy_btn = (self.res_tab == ResTab::Body && self.view.is_some()).then(|| {
+            Button::new("copy")
+                .label(if self.copied { "Copied ✓" } else { "Copy" })
+                .on_click(cx.listener(|this, _ev, _window, cx| {
+                    if let Some(v) = &this.view {
+                        let text = String::from_utf8_lossy(&v.data).into_owned();
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        this.copied = true;
+                        cx.notify();
+                    }
+                }))
+        });
+
         let status_row = div()
             .flex()
             .flex_row()
@@ -835,7 +1480,18 @@ impl Render for Workspace {
             .justify_between()
             .px_3()
             .py_1()
-            .child(div().text_color(status_col).child(status_text))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_3()
+                    .child(div().text_color(status_col).child(status_text))
+                    .children(
+                        self.warning
+                            .clone()
+                            .map(|w| div().text_color(c(0xf9e2af)).child(w)),
+                    ),
+            )
             .child(
                 div()
                     .flex()
@@ -859,6 +1515,7 @@ impl Render for Workspace {
                             cx.notify();
                         })),
                     )
+                    .children(copy_btn)
                     .children(wrap_btn),
             );
 
@@ -1069,7 +1726,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &SendRequest, _window, cx| this.on_send(cx)))
             .on_action(cx.listener(|this, _: &SaveRequest, window, cx| this.on_save(window, cx)))
             .child(sidebar)
-            .child(main_col)
+            .child(if self.main_view == MainView::Environments {
+                self.render_env_page(cx).into_any_element()
+            } else {
+                main_col.into_any_element()
+            })
     }
 }
 

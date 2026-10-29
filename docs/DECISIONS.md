@@ -59,3 +59,12 @@ Tabs are plain buttons (primary = selected) rather than gpui-component's TabBar,
 - Atomic writes: temp file in the same directory, fsync, rename.
 - Data dir: OS standard location via `directories`; `API_TESTER_DATA_DIR` overrides it (testing, portable use).
 - Sidebar is a plain scrolling list for now; it becomes a virtualized list before the 5,000-request target (NFR-PERF-07).
+
+## D25: environments, globals and settings (2026-10-29)
+- **Files:** `<data-dir>/environments/<slug>.toml` (one per environment: `schema_version`, `name`, `[[variables]]` with `key`, `value`, `secret`, `enabled`), `<data-dir>/globals.toml`, `<data-dir>/settings.toml` (just `active_environment` for now). Same atomic-write and schema-version rules as requests. Unreadable or too-new environment files are skipped, never overwritten by accident; a corrupt `globals.toml` shows an error instead of silently loading as empty.
+- **Precedence:** global < active environment (collection and runtime scopes exist in `Variables` but are not wired to the UI yet).
+- **Secrets:** masked in the editor with a Show/Hide toggle, but stored as plain text in the TOML for now. OS keychain storage is FR-ENV-07 (P1). Export is not built yet; when it is, secrets are excluded by default (FR-ENV-04).
+- **Editing model:** the page edits one scope at a time; switching scope, creating an environment, leaving the page, or Cmd/Ctrl+S saves first (and stays put if the save fails), so edits are never lost silently. Delete needs a second click.
+- **URL scheme default:** `https://` is prepended only if the URL has no `://` *after* variable substitution, so `{{base}}/users` works when `base` contains a scheme.
+- **Empty spare rows** in Params/Headers are no longer written into saved request files.
+- **Copy response body** button (pretty-printed text) added to the response bar.

@@ -12,7 +12,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use at_core::Request;
+use at_core::{EnvVar, Environment, Request};
 use serde::{Deserialize, Serialize};
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -65,6 +65,66 @@ struct Versioned {
     schema_version: u32,
 }
 
+#[derive(Serialize)]
+struct EnvFileRef<'a> {
+    schema_version: u32,
+    name: &'a str,
+    variables: &'a [EnvVar],
+}
+
+#[derive(Deserialize)]
+struct EnvFile {
+    #[allow(dead_code)]
+    schema_version: u32,
+    name: String,
+    #[serde(default)]
+    variables: Vec<EnvVar>,
+}
+
+#[derive(Serialize)]
+struct GlobalsFileRef<'a> {
+    schema_version: u32,
+    variables: &'a [EnvVar],
+}
+
+#[derive(Deserialize)]
+struct GlobalsFile {
+    #[allow(dead_code)]
+    schema_version: u32,
+    #[serde(default)]
+    variables: Vec<EnvVar>,
+}
+
+/// Small app settings kept in `<data-dir>/settings.toml` (more fields arrive with the Settings screen).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Settings {
+    #[serde(default = "current_schema")]
+    pub schema_version: u32,
+    /// Name of the active environment, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_environment: Option<String>,
+}
+
+fn current_schema() -> u32 {
+    SCHEMA_VERSION
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            active_environment: None,
+        }
+    }
+}
+
+/// An environment together with the file it lives in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnvEntry {
+    pub env: Environment,
+    pub path: PathBuf,
+}
+
 #[derive(Serialize, Deserialize)]
 struct CollectionFile {
     schema_version: u32,
@@ -114,7 +174,9 @@ pub struct CollectionTree {
 
 #[derive(Debug, Clone)]
 pub struct Store {
+    /// `<data-dir>/collections`
     root: PathBuf,
+    data_dir: PathBuf,
 }
 
 /// File-system friendly name: lowercase, letters/digits kept, everything else becomes `-`.
@@ -196,9 +258,10 @@ impl Store {
     }
 
     pub fn open_at(data_dir: impl Into<PathBuf>) -> Result<Store, StoreError> {
-        let root = data_dir.into().join("collections");
+        let data_dir: PathBuf = data_dir.into();
+        let root = data_dir.join("collections");
         fs::create_dir_all(&root).map_err(io(&root))?;
-        Ok(Store { root })
+        Ok(Store { root, data_dir })
     }
 
     pub fn root(&self) -> &Path {
@@ -351,6 +414,147 @@ impl Store {
 
     pub fn delete_request(path: &Path) -> Result<(), StoreError> {
         fs::remove_file(path).map_err(io(path))
+    }
+
+    // ---- environments, globals, settings (FR-ENV-01/02, FR-PER-01) ----
+
+    fn env_dir(&self) -> PathBuf {
+        self.data_dir.join("environments")
+    }
+
+    fn globals_path(&self) -> PathBuf {
+        self.data_dir.join("globals.toml")
+    }
+
+    fn settings_path(&self) -> PathBuf {
+        self.data_dir.join("settings.toml")
+    }
+
+    fn read_versioned(path: &Path) -> Result<String, StoreError> {
+        let text = fs::read_to_string(path).map_err(io(path))?;
+        let v: Versioned = toml::from_str(&text).map_err(|e| StoreError::Parse {
+            path: path.to_path_buf(),
+            msg: e.to_string(),
+        })?;
+        if v.schema_version > SCHEMA_VERSION {
+            return Err(StoreError::TooNew {
+                path: path.to_path_buf(),
+                found: v.schema_version,
+                supported: SCHEMA_VERSION,
+            });
+        }
+        Ok(text)
+    }
+
+    /// All environments, sorted by name. Unreadable files are skipped (they are never overwritten
+    /// unless the user saves an environment with the same file name).
+    pub fn list_environments(&self) -> Vec<EnvEntry> {
+        let dir = self.env_dir();
+        let mut out = Vec::new();
+        let Ok(rd) = fs::read_dir(&dir) else {
+            return out;
+        };
+        for entry in rd.flatten() {
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path();
+            if is_hidden(&file_name) || !file_name.ends_with(".toml") || path.is_dir() {
+                continue;
+            }
+            let parsed = Store::read_versioned(&path).and_then(|text| {
+                toml::from_str::<EnvFile>(&text).map_err(|e| StoreError::Parse {
+                    path: path.clone(),
+                    msg: e.to_string(),
+                })
+            });
+            if let Ok(f) = parsed {
+                out.push(EnvEntry {
+                    env: Environment {
+                        name: f.name,
+                        variables: f.variables,
+                    },
+                    path,
+                });
+            }
+        }
+        out.sort_by_key(|e| e.env.name.to_lowercase());
+        out
+    }
+
+    /// Save an environment. `replace` is the file it was loaded from (overwritten in place, or
+    /// removed if the new name maps to a different file name).
+    pub fn save_environment(
+        &self,
+        env: &Environment,
+        replace: Option<&Path>,
+    ) -> Result<PathBuf, StoreError> {
+        let dir = self.env_dir();
+        fs::create_dir_all(&dir).map_err(io(&dir))?;
+        let target = unique_path(&dir, &slug(&env.name), ".toml", replace);
+        let text = toml::to_string_pretty(&EnvFileRef {
+            schema_version: SCHEMA_VERSION,
+            name: &env.name,
+            variables: &env.variables,
+        })
+        .map_err(|e| StoreError::Serialize {
+            path: target.clone(),
+            msg: e.to_string(),
+        })?;
+        atomic_write(&target, &text)?;
+        if let Some(old) = replace {
+            if old != target && old.exists() {
+                fs::remove_file(old).map_err(io(old))?;
+            }
+        }
+        Ok(target)
+    }
+
+    pub fn delete_environment(&self, path: &Path) -> Result<(), StoreError> {
+        fs::remove_file(path).map_err(io(path))
+    }
+
+    /// Global variables; a missing file means none.
+    pub fn load_globals(&self) -> Result<Vec<EnvVar>, StoreError> {
+        let path = self.globals_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let text = Store::read_versioned(&path)?;
+        let f: GlobalsFile = toml::from_str(&text).map_err(|e| StoreError::Parse {
+            path: path.clone(),
+            msg: e.to_string(),
+        })?;
+        Ok(f.variables)
+    }
+
+    pub fn save_globals(&self, vars: &[EnvVar]) -> Result<(), StoreError> {
+        let path = self.globals_path();
+        let text = toml::to_string_pretty(&GlobalsFileRef {
+            schema_version: SCHEMA_VERSION,
+            variables: vars,
+        })
+        .map_err(|e| StoreError::Serialize {
+            path: path.clone(),
+            msg: e.to_string(),
+        })?;
+        atomic_write(&path, &text)
+    }
+
+    /// Settings; a missing or unreadable file gives the defaults (settings are never worth a crash).
+    pub fn load_settings(&self) -> Settings {
+        let path = self.settings_path();
+        Store::read_versioned(&path)
+            .ok()
+            .and_then(|t| toml::from_str::<Settings>(&t).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_settings(&self, s: &Settings) -> Result<(), StoreError> {
+        let path = self.settings_path();
+        let text = toml::to_string_pretty(s).map_err(|e| StoreError::Serialize {
+            path: path.clone(),
+            msg: e.to_string(),
+        })?;
+        atomic_write(&path, &text)
     }
 }
 
@@ -532,5 +736,115 @@ mod tests {
         let all = store.load_all().unwrap();
         assert!(all.iter().all(|c| c.name == "Work API"));
         assert_eq!(all.len(), 2);
+    }
+    #[test]
+    fn environments_roundtrip_rename_and_delete() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        assert!(store.list_environments().is_empty());
+        let env = Environment {
+            name: "Staging".into(),
+            variables: vec![
+                EnvVar::new("host", "staging.test"),
+                EnvVar {
+                    secret: true,
+                    ..EnvVar::new("token", "s3cr\"et")
+                },
+            ],
+        };
+        let path = store.save_environment(&env, None).unwrap();
+        assert!(path.ends_with("environments/staging.toml"));
+        let list = store.list_environments();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].env, env);
+
+        // rename moves the file
+        let renamed = Environment {
+            name: "Prod".into(),
+            ..env.clone()
+        };
+        let p2 = store.save_environment(&renamed, Some(&path)).unwrap();
+        assert!(!path.exists());
+        assert!(p2.ends_with("environments/prod.toml"));
+        assert_eq!(store.list_environments().len(), 1);
+
+        store.delete_environment(&p2).unwrap();
+        assert!(store.list_environments().is_empty());
+    }
+
+    #[test]
+    fn same_environment_name_gets_a_second_file() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        let env = Environment {
+            name: "Dev".into(),
+            variables: vec![],
+        };
+        let a = store.save_environment(&env, None).unwrap();
+        let b = store.save_environment(&env, None).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(store.list_environments().len(), 2);
+    }
+
+    #[test]
+    fn broken_environment_file_is_skipped_not_fatal() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        store
+            .save_environment(
+                &Environment {
+                    name: "Ok".into(),
+                    variables: vec![],
+                },
+                None,
+            )
+            .unwrap();
+        fs::write(t.path().join("environments/bad.toml"), "= =").unwrap();
+        fs::write(
+            t.path().join("environments/new.toml"),
+            "schema_version = 99\nname = \"Future\"\n",
+        )
+        .unwrap();
+        let list = store.list_environments();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].env.name, "Ok");
+    }
+
+    #[test]
+    fn globals_missing_means_empty_and_roundtrip() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        assert!(store.load_globals().unwrap().is_empty());
+        let vars = vec![EnvVar::new("a", "1"), EnvVar::new("b", "line1\nline2")];
+        store.save_globals(&vars).unwrap();
+        assert_eq!(store.load_globals().unwrap(), vars);
+        // saving an empty list is valid too
+        store.save_globals(&[]).unwrap();
+        assert!(store.load_globals().unwrap().is_empty());
+    }
+
+    #[test]
+    fn corrupt_globals_is_an_error_not_silent() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        fs::write(t.path().join("globals.toml"), "= =").unwrap();
+        assert!(store.load_globals().is_err());
+    }
+
+    #[test]
+    fn settings_default_roundtrip_and_bad_file() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        assert_eq!(store.load_settings(), Settings::default());
+        let s = Settings {
+            active_environment: Some("Prod".into()),
+            ..Default::default()
+        };
+        store.save_settings(&s).unwrap();
+        assert_eq!(store.load_settings(), s);
+        store.save_settings(&Settings::default()).unwrap();
+        assert_eq!(store.load_settings().active_environment, None);
+        fs::write(t.path().join("settings.toml"), "= =").unwrap();
+        assert_eq!(store.load_settings(), Settings::default());
     }
 }
