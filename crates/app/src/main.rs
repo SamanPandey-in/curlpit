@@ -1,4 +1,4 @@
-//! API Tester — Phase 2a: one window, send a request, read the response.
+//! API Tester — one window, request tabs, send a request, read the response.
 //! Network work runs on its own tokio threads; results come back over a channel.
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,7 +24,10 @@ use tokio_util::sync::CancellationToken;
 /// Width of the sticky line-number gutter (px).
 const GUTTER: f32 = 76.0;
 
-actions!(api_tester, [SendRequest, SaveRequest]);
+actions!(api_tester, [SendRequest, SaveRequest, NewTab, CloseTab]);
+
+/// Longest tab title, in characters; longer names are cut with an ellipsis.
+const TAB_TITLE_MAX: usize = 24;
 
 fn mono() -> &'static str {
     if cfg!(target_os = "macos") {
@@ -108,6 +111,32 @@ enum ResTab {
 enum Which {
     Params,
     Headers,
+}
+
+/// Tab button text for a request name: trimmed, "Untitled" when empty, cut with an ellipsis.
+fn tab_title(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        return "Untitled".into();
+    }
+    if name.chars().count() > TAB_TITLE_MAX {
+        let cut: String = name.chars().take(TAB_TITLE_MAX - 1).collect();
+        format!("{cut}…")
+    } else {
+        name.to_string()
+    }
+}
+
+/// Which tab is active after `closed` is removed, leaving `remaining` tabs: the same tab if it
+/// is still there, else its right neighbour, else the last one.
+fn active_after_close(active: usize, closed: usize, remaining: usize) -> usize {
+    if remaining == 0 {
+        0
+    } else if closed < active {
+        active - 1
+    } else {
+        active.min(remaining - 1)
+    }
 }
 
 /// One editable key/value row (params or headers).
@@ -201,13 +230,11 @@ struct SidebarItem {
     depth: usize,
     label: String,
     kind: ItemKind,
-    /// Collection directory name this item belongs to.
-    col: String,
     /// Collection dir, folder dir, or request file.
     path: PathBuf,
 }
 
-fn push_nodes(items: &mut Vec<SidebarItem>, nodes: &[Node], depth: usize, col: &str) {
+fn push_nodes(items: &mut Vec<SidebarItem>, nodes: &[Node], depth: usize) {
     for n in nodes {
         match n {
             Node::Folder {
@@ -219,23 +246,20 @@ fn push_nodes(items: &mut Vec<SidebarItem>, nodes: &[Node], depth: usize, col: &
                     depth,
                     label: name.clone(),
                     kind: ItemKind::Folder,
-                    col: col.into(),
                     path: path.clone(),
                 });
-                push_nodes(items, children, depth + 1, col);
+                push_nodes(items, children, depth + 1);
             }
             Node::Request { name, path } => items.push(SidebarItem {
                 depth,
                 label: name.clone(),
                 kind: ItemKind::Request,
-                col: col.into(),
                 path: path.clone(),
             }),
             Node::Broken { name, path, error } => items.push(SidebarItem {
                 depth,
                 label: name.clone(),
                 kind: ItemKind::Broken(error.clone()),
-                col: col.into(),
                 path: path.clone(),
             }),
         }
@@ -265,31 +289,266 @@ struct ViewData {
     longest_chars: usize,
 }
 
-struct Workspace {
-    rt: tokio::runtime::Handle,
+/// Everything that belongs to one open request: its editor, where it is saved, and the last
+/// response. Tabs are independent, so a request can be in flight in one while you edit another.
+struct RequestTab {
+    /// Stable identity (indices shift when tabs close); in-flight results find their tab by it.
+    id: u64,
+    name: Entity<InputState>,
     method: Method,
     url: Entity<InputState>,
     body: Entity<InputState>,
-    status: Status,
-    view: Option<ViewData>,
-    cancel: Option<CancellationToken>,
     params: Vec<KvRow>,
     headers: Vec<KvRow>,
     req_tab: ReqTab,
+    /// The file this tab is saved to, if any.
+    current_path: Option<PathBuf>,
+    /// Folder the next Save goes to when the tab has no file yet.
+    save_dir: Option<PathBuf>,
+    /// The editor contents as of the last open/save; the tab is "unsaved" when they differ.
+    saved: Request,
+    /// The close button was clicked once on an unsaved tab; a second click discards it.
+    confirm_close: bool,
+    status: Status,
+    view: Option<ViewData>,
+    cancel: Option<CancellationToken>,
     res_tab: ResTab,
     resp_headers: Vec<(String, String)>,
-    _subs: Vec<Subscription>,
-    name: Entity<InputState>,
-    store: Option<Store>,
-    items: Vec<SidebarItem>,
-    current_col: Option<String>,
-    current_path: Option<PathBuf>,
-    save_dir: Option<PathBuf>,
-    focus: FocusHandle,
-    focused_once: bool,
     wrap: bool,
     /// Horizontal scroll of the response text in px (0 = left edge). The gutter never moves.
     scroll_x: f32,
+    /// Shown next to the status, e.g. unresolved `{{variables}}` in the last request.
+    warning: Option<String>,
+    copied: bool,
+    _sub: Subscription,
+}
+
+impl RequestTab {
+    /// A new tab. `blank` gives an empty request; otherwise the httpbin starter example.
+    fn create(
+        id: u64,
+        blank: bool,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> RequestTab {
+        let (url_text, body_text, params) = if blank {
+            ("", "", vec![Workspace::new_row(window, cx, "", "")])
+        } else {
+            (
+                "https://httpbin.org/get",
+                "{\n  \"hello\": \"world\"\n}",
+                vec![Workspace::new_row(window, cx, "hello", "world")],
+            )
+        };
+        let url = cx.new(|cx| InputState::new(window, cx).default_value(url_text));
+        let body = cx.new(|cx| {
+            InputState::new(window, cx)
+                .code_editor("json")
+                .line_number(true)
+                .default_value(body_text)
+        });
+        let name = cx.new(|cx| InputState::new(window, cx).default_value("New request"));
+        let headers = vec![Workspace::new_row(window, cx, "", "")];
+        // Enter in the URL box sends (but never cancels an in-flight request).
+        let sub = cx.subscribe_in(
+            &url,
+            window,
+            move |this, _state, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. })
+                    && this.tabs.iter().any(|t| t.id == id && t.cancel.is_none())
+                {
+                    this.send_tab(id, cx);
+                }
+            },
+        );
+        let mut tab = RequestTab {
+            id,
+            name,
+            method: Method::Get,
+            url,
+            body,
+            params,
+            headers,
+            req_tab: ReqTab::Params,
+            current_path: None,
+            save_dir: None,
+            saved: Request::default(),
+            confirm_close: false,
+            status: Status::Idle,
+            view: None,
+            cancel: None,
+            res_tab: ResTab::Body,
+            resp_headers: Vec::new(),
+            wrap: false,
+            scroll_x: 0.0,
+            warning: None,
+            copied: false,
+            _sub: sub,
+        };
+        tab.saved = tab.current_request(cx);
+        tab
+    }
+
+    fn rows_mut(&mut self, which: Which) -> &mut Vec<KvRow> {
+        match which {
+            Which::Params => &mut self.params,
+            Which::Headers => &mut self.headers,
+        }
+    }
+
+    /// The request as currently typed.
+    fn current_request(&self, cx: &App) -> Request {
+        let mut req = Request {
+            name: self.name.read(cx).value().to_string(),
+            method: self.method,
+            url: self.url.read(cx).value().to_string().trim().to_string(),
+            ..Default::default()
+        };
+        req.params = collect(&self.params, cx);
+        req.headers = collect(&self.headers, cx);
+        let text = self.body.read(cx).value().to_string();
+        if !text.trim().is_empty() {
+            req.body = Body::Json { raw: text };
+        }
+        req
+    }
+
+    fn is_dirty(&self, cx: &App) -> bool {
+        self.current_request(cx) != self.saved
+    }
+
+    /// Never edited, saved or sent: safe to reuse for opening a request from the sidebar.
+    fn is_pristine(&self, cx: &App) -> bool {
+        self.current_path.is_none() && self.view.is_none() && !self.is_dirty(cx)
+    }
+
+    /// Text for the tab button (without the unsaved marker).
+    fn title(&self, cx: &App) -> String {
+        tab_title(self.name.read(cx).value().as_ref())
+    }
+
+    /// Put a loaded request into the editor and remember it as the saved state.
+    fn apply_request(&mut self, req: Request, window: &mut Window, cx: &mut Context<Workspace>) {
+        self.method = req.method;
+        let url = req.url.clone();
+        self.url.update(cx, |s, cx| s.set_value(url, window, cx));
+        let name = req.name.clone();
+        self.name.update(cx, |s, cx| s.set_value(name, window, cx));
+        let body_text = match &req.body {
+            Body::Json { raw } | Body::Text { raw } | Body::Xml { raw } | Body::Html { raw } => {
+                raw.clone()
+            }
+            _ => String::new(),
+        };
+        self.body
+            .update(cx, |s, cx| s.set_value(body_text, window, cx));
+        let mut params: Vec<KvRow> = req
+            .params
+            .iter()
+            .map(|kv| {
+                let mut r = Workspace::new_row(window, cx, &kv.key, &kv.value);
+                r.enabled = kv.enabled;
+                r
+            })
+            .collect();
+        if params.is_empty() {
+            params.push(Workspace::new_row(window, cx, "", ""));
+        }
+        let mut headers: Vec<KvRow> = req
+            .headers
+            .iter()
+            .map(|kv| {
+                let mut r = Workspace::new_row(window, cx, &kv.key, &kv.value);
+                r.enabled = kv.enabled;
+                r
+            })
+            .collect();
+        if headers.is_empty() {
+            headers.push(Workspace::new_row(window, cx, "", ""));
+        }
+        self.params = params;
+        self.headers = headers;
+        self.saved = self.current_request(cx);
+    }
+
+    fn set_view(&mut self, data: Vec<u8>) {
+        let base = build_rows(&data, MAX_ROW_CHARS);
+        let longest = base.longest_row(&data);
+        let longest_chars = count_chars(base.row(&data, longest));
+        self.view = Some(ViewData {
+            data: Arc::new(data),
+            base: Arc::new(base),
+            wrapped: None,
+            longest_chars,
+        });
+        self.scroll_x = 0.0;
+    }
+
+    fn max_scroll_x(&self, avail: f32) -> f32 {
+        match &self.view {
+            Some(v) => (v.longest_chars as f32 * char_w() + 24.0 - avail).max(0.0),
+            None => 0.0,
+        }
+    }
+
+    fn apply(&mut self, result: Result<at_http::HttpResponse, HttpError>) {
+        match result {
+            Ok(resp) => {
+                let mut hs = resp.headers.clone();
+                hs.sort_by(|a, b| a.0.cmp(&b.0));
+                self.resp_headers = hs;
+                let ct = resp
+                    .headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                match resp.body {
+                    ResponseBody::Memory(b) => {
+                        let first = b.iter().find(|ch| !ch.is_ascii_whitespace()).copied();
+                        let looks_json =
+                            ct.contains("json") || matches!(first, Some(b'{') | Some(b'['));
+                        let data = if looks_json {
+                            pretty_json(&b, 2)
+                        } else {
+                            b.to_vec()
+                        };
+                        self.set_view(data);
+                    }
+                    ResponseBody::File { path, len } => {
+                        let msg = format!(
+                            "The response body is {} and was saved to:\n{}\n\n(The viewer for large spilled bodies arrives in a later slice.)",
+                            human(len),
+                            path.display()
+                        );
+                        self.set_view(msg.into_bytes());
+                    }
+                }
+                self.status = Status::Done {
+                    code: resp.status,
+                    text: resp.status_text,
+                    ms: resp.elapsed.as_millis(),
+                    size: resp.size,
+                };
+            }
+            Err(HttpError::Cancelled) => self.status = Status::Error("Cancelled".into()),
+            Err(e) => self.status = Status::Error(e.to_string()),
+        }
+    }
+}
+
+struct Workspace {
+    rt: tokio::runtime::Handle,
+    tabs: Vec<RequestTab>,
+    active: usize,
+    next_tab_id: u64,
+    /// Messages for the environments page (and startup storage errors); each tab has its own
+    /// status for request messages.
+    status: Status,
+    store: Option<Store>,
+    items: Vec<SidebarItem>,
+    focus: FocusHandle,
+    focused_once: bool,
     // ---- environments (Phase 3b) ----
     main_view: MainView,
     globals: Vec<EnvVar>,
@@ -300,62 +559,29 @@ struct Workspace {
     env_name: Entity<InputState>,
     env_rows: Vec<EnvRow>,
     confirm_delete: bool,
-    /// Shown next to the status, e.g. unresolved `{{variables}}` in the last request.
-    warning: Option<String>,
-    copied: bool,
 }
 
 impl Workspace {
     fn new(rt: tokio::runtime::Handle, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let url = cx.new(|cx| InputState::new(window, cx).default_value("https://httpbin.org/get"));
-        let body = cx.new(|cx| {
-            InputState::new(window, cx)
-                .code_editor("json")
-                .line_number(true)
-                .default_value("{\n  \"hello\": \"world\"\n}")
-        });
-        let name = cx.new(|cx| InputState::new(window, cx).default_value("New request"));
         let env_name = cx.new(|cx| InputState::new(window, cx));
         let (store, store_err) = match Store::open_default() {
             Ok(s) => (Some(s), None),
             Err(e) => (None, Some(e.to_string())),
         };
-        let params = vec![Self::new_row(window, cx, "hello", "world")];
-        let headers = vec![Self::new_row(window, cx, "", "")];
-        // Enter in the URL box sends (but never cancels an in-flight request).
-        let sub = cx.subscribe_in(
-            &url,
-            window,
-            |this, _state, event: &InputEvent, _window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) && this.cancel.is_none() {
-                    this.on_send(cx);
-                }
-            },
-        );
+        let mut first = RequestTab::create(0, false, window, cx);
+        if let Some(e) = &store_err {
+            first.status = Status::Error(e.clone());
+        }
         let mut me = Self {
             rt,
-            method: Method::Get,
-            url,
-            body,
+            tabs: vec![first],
+            active: 0,
+            next_tab_id: 1,
             status: store_err.map(Status::Error).unwrap_or(Status::Idle),
-            view: None,
-            cancel: None,
-            params,
-            headers,
-            req_tab: ReqTab::Params,
-            res_tab: ResTab::Body,
-            resp_headers: Vec::new(),
-            _subs: vec![sub],
-            name,
             store,
             items: Vec::new(),
-            current_col: None,
-            current_path: None,
-            save_dir: None,
             focus: cx.focus_handle(),
             focused_once: false,
-            wrap: false,
-            scroll_x: 0.0,
             main_view: MainView::Request,
             globals: Vec::new(),
             envs: Vec::new(),
@@ -364,8 +590,6 @@ impl Workspace {
             env_name,
             env_rows: Vec::new(),
             confirm_delete: false,
-            warning: None,
-            copied: false,
         };
         me.refresh_sidebar();
         me.reload_envs();
@@ -383,11 +607,74 @@ impl Workspace {
         }
     }
 
-    fn rows_mut(&mut self, which: Which) -> &mut Vec<KvRow> {
-        match which {
-            Which::Params => &mut self.params,
-            Which::Headers => &mut self.headers,
+    // ---------------- request tabs ----------------
+
+    fn tab(&self) -> &RequestTab {
+        &self.tabs[self.active]
+    }
+
+    fn tab_mut(&mut self) -> &mut RequestTab {
+        &mut self.tabs[self.active]
+    }
+
+    /// Keep keyboard shortcuts working after a button click moved focus away.
+    fn refocus(&self, window: &mut Window) {
+        window.focus(&self.focus);
+    }
+
+    fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let tab = RequestTab::create(id, true, window, cx);
+        // New requests go to the folder the current tab was using.
+        let dir = self.tab().save_dir.clone();
+        self.tabs.push(tab);
+        self.active = self.tabs.len() - 1;
+        self.tab_mut().save_dir = dir;
+        self.refocus(window);
+        cx.notify();
+    }
+
+    fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix >= self.tabs.len() {
+            return;
         }
+        for (i, t) in self.tabs.iter_mut().enumerate() {
+            if i != ix {
+                t.confirm_close = false;
+            }
+        }
+        self.active = ix;
+        self.refocus(window);
+        cx.notify();
+    }
+
+    /// Close a tab. An unsaved tab needs a second click (or Cmd+W again) to discard it.
+    fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix >= self.tabs.len() {
+            return;
+        }
+        if self.tabs[ix].is_dirty(cx) && !self.tabs[ix].confirm_close {
+            self.tabs[ix].confirm_close = true;
+            self.tabs[ix].status = Status::Info(
+                "Unsaved changes: Save first, or click the tab's Discard? to close it anyway"
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        if let Some(token) = self.tabs[ix].cancel.take() {
+            token.cancel();
+        }
+        self.tabs.remove(ix);
+        if self.tabs.is_empty() {
+            let id = self.next_tab_id;
+            self.next_tab_id += 1;
+            self.tabs.push(RequestTab::create(id, true, window, cx));
+        }
+        self.active = active_after_close(self.active, ix, self.tabs.len());
+        self.refocus(window);
+        cx.notify();
     }
 
     // ---------------- environments (FR-ENV-01..05) ----------------
@@ -907,10 +1194,10 @@ impl Workspace {
             )
     }
 
-    fn render_kv(&self, which: Which, cx: &Context<Self>) -> impl IntoElement {
+    fn render_kv(&self, tab: &RequestTab, which: Which, cx: &Context<Self>) -> impl IntoElement {
         let (rows, en_id, del_id, add_id) = match which {
-            Which::Params => (&self.params, "p-en", "p-del", "p-add"),
-            Which::Headers => (&self.headers, "h-en", "h-del", "h-add"),
+            Which::Params => (&tab.params, "p-en", "p-del", "p-add"),
+            Which::Headers => (&tab.headers, "h-en", "h-del", "h-add"),
         };
         let muted = cx.theme().muted_foreground;
         let mut col = div().flex().flex_col().gap_1().p_2().child(
@@ -936,7 +1223,7 @@ impl Workspace {
                             Checkbox::new((en_id, ix))
                                 .checked(row.enabled)
                                 .on_click(cx.listener(move |this, checked: &bool, _window, cx| {
-                                    if let Some(r) = this.rows_mut(which).get_mut(ix) {
+                                    if let Some(r) = this.tab_mut().rows_mut(which).get_mut(ix) {
                                         r.enabled = *checked;
                                     }
                                     cx.notify();
@@ -948,7 +1235,7 @@ impl Workspace {
                     .child(div().w(px(36.)).flex_none().child(
                         Button::new((del_id, ix)).label("✕").on_click(cx.listener(
                             move |this, _ev, _window, cx| {
-                                let rows = this.rows_mut(which);
+                                let rows = this.tab_mut().rows_mut(which);
                                 if ix < rows.len() {
                                     rows.remove(ix);
                                 }
@@ -962,69 +1249,11 @@ impl Workspace {
             div().child(Button::new(add_id).label("+ Add").on_click(cx.listener(
                 move |this, _ev, window, cx| {
                     let row = Self::new_row(window, cx, "", "");
-                    this.rows_mut(which).push(row);
+                    this.tab_mut().rows_mut(which).push(row);
                     cx.notify();
                 },
             ))),
         )
-    }
-
-    fn current_request(&self, cx: &App) -> Request {
-        let mut req = Request {
-            name: self.name.read(cx).value().to_string(),
-            method: self.method,
-            url: self.url.read(cx).value().to_string().trim().to_string(),
-            ..Default::default()
-        };
-        req.params = collect(&self.params, cx);
-        req.headers = collect(&self.headers, cx);
-        let text = self.body.read(cx).value().to_string();
-        if !text.trim().is_empty() {
-            req.body = Body::Json { raw: text };
-        }
-        req
-    }
-
-    fn apply_request(&mut self, req: Request, window: &mut Window, cx: &mut Context<Self>) {
-        self.method = req.method;
-        let url = req.url.clone();
-        self.url.update(cx, |s, cx| s.set_value(url, window, cx));
-        let name = req.name.clone();
-        self.name.update(cx, |s, cx| s.set_value(name, window, cx));
-        let body_text = match &req.body {
-            Body::Json { raw } | Body::Text { raw } | Body::Xml { raw } | Body::Html { raw } => {
-                raw.clone()
-            }
-            _ => String::new(),
-        };
-        self.body
-            .update(cx, |s, cx| s.set_value(body_text, window, cx));
-        let mut params: Vec<KvRow> = req
-            .params
-            .iter()
-            .map(|kv| {
-                let mut r = Self::new_row(window, cx, &kv.key, &kv.value);
-                r.enabled = kv.enabled;
-                r
-            })
-            .collect();
-        if params.is_empty() {
-            params.push(Self::new_row(window, cx, "", ""));
-        }
-        let mut headers: Vec<KvRow> = req
-            .headers
-            .iter()
-            .map(|kv| {
-                let mut r = Self::new_row(window, cx, &kv.key, &kv.value);
-                r.enabled = kv.enabled;
-                r
-            })
-            .collect();
-        if headers.is_empty() {
-            headers.push(Self::new_row(window, cx, "", ""));
-        }
-        self.params = params;
-        self.headers = headers;
     }
 
     fn refresh_sidebar(&mut self) {
@@ -1039,13 +1268,12 @@ impl Workspace {
                         depth: 0,
                         label: t.name.clone(),
                         kind: ItemKind::Collection,
-                        col: t.dir_name.clone(),
                         path: t.dir.clone(),
                     });
-                    push_nodes(&mut self.items, &t.children, 1, &t.dir_name);
+                    push_nodes(&mut self.items, &t.children, 1);
                 }
             }
-            Err(e) => self.status = Status::Error(e.to_string()),
+            Err(e) => self.tab_mut().status = Status::Error(e.to_string()),
         }
     }
 
@@ -1055,24 +1283,51 @@ impl Workspace {
         };
         match item.kind {
             ItemKind::Collection | ItemKind::Folder => {
-                self.current_col = Some(item.col);
-                self.save_dir = Some(item.path);
-                self.current_path = None;
-                self.status = Status::Info("New requests will be saved here".into());
+                let tab = self.tab_mut();
+                tab.save_dir = Some(item.path);
+                tab.current_path = None;
+                tab.status = Status::Info("New requests will be saved here".into());
             }
-            ItemKind::Broken(e) => self.status = Status::Error(e),
-            ItemKind::Request => match Store::load_request(&item.path) {
-                Ok(req) => {
-                    self.apply_request(req, window, cx);
-                    self.current_col = Some(item.col);
-                    self.save_dir = item.path.parent().map(|d| d.to_path_buf());
-                    self.current_path = Some(item.path);
-                    self.status = Status::Info("Opened".into());
-                }
-                Err(e) => self.status = Status::Error(e.to_string()),
-            },
+            ItemKind::Broken(e) => self.tab_mut().status = Status::Error(e),
+            ItemKind::Request => self.open_request(item.path, window, cx),
         }
         cx.notify();
+    }
+
+    /// Open a saved request: focus its tab if it is already open, reuse an untouched blank tab,
+    /// otherwise open a new tab.
+    fn open_request(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // Leaving the environments page autosaves it; if that fails, stay there.
+        if self.main_view == MainView::Environments {
+            self.close_envs(cx);
+            if self.main_view == MainView::Environments {
+                return;
+            }
+        }
+        if let Some(ix) = self
+            .tabs
+            .iter()
+            .position(|t| t.current_path.as_ref() == Some(&path))
+        {
+            self.activate_tab(ix, window, cx);
+            return;
+        }
+        let req = match Store::load_request(&path) {
+            Ok(r) => r,
+            Err(e) => {
+                self.tab_mut().status = Status::Error(e.to_string());
+                return;
+            }
+        };
+        if !self.tab().is_pristine(cx) {
+            self.add_tab(window, cx);
+        }
+        let tab = self.tab_mut();
+        tab.apply_request(req, window, cx);
+        tab.save_dir = path.parent().map(|d| d.to_path_buf());
+        tab.current_path = Some(path);
+        tab.confirm_close = false;
+        tab.status = Status::Info("Opened".into());
     }
 
     fn on_new_collection(&mut self, cx: &mut Context<Self>) {
@@ -1087,13 +1342,13 @@ impl Workspace {
             + 1;
         match store.create_collection(&format!("Collection {n}")) {
             Ok(c) => {
-                self.save_dir = Some(c.dir);
-                self.current_col = Some(c.dir_name);
-                self.current_path = None;
                 self.refresh_sidebar();
-                self.status = Status::Info("Collection created; Save puts requests in it".into());
+                let tab = self.tab_mut();
+                tab.save_dir = Some(c.dir);
+                tab.current_path = None;
+                tab.status = Status::Info("Collection created; Save puts requests in it".into());
             }
-            Err(e) => self.status = Status::Error(e.to_string()),
+            Err(e) => self.tab_mut().status = Status::Error(e.to_string()),
         }
         cx.notify();
     }
@@ -1106,15 +1361,15 @@ impl Workspace {
             return;
         }
         let Some(store) = self.store.clone() else {
-            self.status = Status::Error("Storage is unavailable on this system".into());
+            self.tab_mut().status = Status::Error("Storage is unavailable on this system".into());
             cx.notify();
             return;
         };
-        let mut req = self.current_request(cx);
+        let mut req = self.tab().current_request(cx);
         if req.name.trim().is_empty() {
             req.name = "Untitled request".into();
         }
-        let dir = match (&self.current_path, &self.save_dir) {
+        let dir = match (&self.tab().current_path, &self.tab().save_dir) {
             (Some(p), _) => p.parent().map(|d| d.to_path_buf()),
             (None, Some(d)) => Some(d.clone()),
             _ => None,
@@ -1126,71 +1381,64 @@ impl Workspace {
                 _ => match store.create_collection("My Collection") {
                     Ok(c) => c.dir,
                     Err(e) => {
-                        self.status = Status::Error(e.to_string());
+                        self.tab_mut().status = Status::Error(e.to_string());
                         cx.notify();
                         return;
                     }
                 },
             },
         };
-        match Store::save_request(&dir, &req, self.current_path.as_deref()) {
+        match Store::save_request(&dir, &req, self.tab().current_path.as_deref()) {
             Ok(path) => {
-                self.save_dir = path.parent().map(|d| d.to_path_buf());
-                self.status = Status::Info(format!("Saved to {}", path.display()));
-                self.current_path = Some(path);
+                let saved = self.tab().current_request(cx);
+                let tab = self.tab_mut();
+                tab.save_dir = path.parent().map(|d| d.to_path_buf());
+                tab.status = Status::Info(format!("Saved to {}", path.display()));
+                tab.current_path = Some(path);
+                tab.saved = saved;
+                tab.confirm_close = false;
                 self.refresh_sidebar();
             }
-            Err(e) => self.status = Status::Error(e.to_string()),
+            Err(e) => self.tab_mut().status = Status::Error(e.to_string()),
         }
         cx.notify();
     }
 
-    fn set_view(&mut self, data: Vec<u8>) {
-        let base = build_rows(&data, MAX_ROW_CHARS);
-        let longest = base.longest_row(&data);
-        let longest_chars = count_chars(base.row(&data, longest));
-        self.view = Some(ViewData {
-            data: Arc::new(data),
-            base: Arc::new(base),
-            wrapped: None,
-            longest_chars,
-        });
-        self.scroll_x = 0.0;
+    /// Send the active tab's request, or cancel it if one is already in flight.
+    fn send_active(&mut self, cx: &mut Context<Self>) {
+        let id = self.tab().id;
+        self.send_tab(id, cx);
     }
 
-    fn max_scroll_x(&self, avail: f32) -> f32 {
-        match &self.view {
-            Some(v) => (v.longest_chars as f32 * char_w() + 24.0 - avail).max(0.0),
-            None => 0.0,
-        }
-    }
-
-    /// Send, or cancel if a request is already in flight.
-    fn on_send(&mut self, cx: &mut Context<Self>) {
-        if let Some(token) = self.cancel.take() {
+    /// Send a tab's request, or cancel it if one is already in flight.
+    fn send_tab(&mut self, id: u64, cx: &mut Context<Self>) {
+        let vars = self.variables();
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else {
+            return;
+        };
+        if let Some(token) = tab.cancel.take() {
             token.cancel();
             return;
         }
-        let mut req = self.current_request(cx);
-        let vars = self.variables();
+        let mut req = tab.current_request(cx);
         // Decide on the default scheme after substitution, so `{{base}}/users` works when
         // `base` already contains `https://`.
         if !req.url.is_empty() && !vars.resolve(&req.url).text.contains("://") {
             req.url = format!("https://{}", req.url);
         }
-        if !has_body(self.method) {
+        if !has_body(tab.method) {
             req.body = Body::None;
         }
         let built = match build(&req, &vars) {
             Ok(b) => b,
             Err(e) => {
-                self.status = Status::Error(e.to_string());
-                self.warning = None;
+                tab.status = Status::Error(e.to_string());
+                tab.warning = None;
                 cx.notify();
                 return;
             }
         };
-        self.warning = if built.unresolved.is_empty() {
+        tab.warning = if built.unresolved.is_empty() {
             None
         } else {
             Some(format!(
@@ -1198,11 +1446,11 @@ impl Workspace {
                 built.unresolved.join(", ")
             ))
         };
-        self.copied = false;
+        tab.copied = false;
 
         let token = CancellationToken::new();
-        self.cancel = Some(token.clone());
-        self.status = Status::Loading;
+        tab.cancel = Some(token.clone());
+        tab.status = Status::Loading;
         cx.notify();
 
         let (tx, rx) = async_channel::bounded(1);
@@ -1215,59 +1463,17 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             if let Ok(result) = rx.recv().await {
                 this.update(cx, |this, cx| {
-                    this.cancel = None;
-                    this.apply(result);
+                    // The tab may have been closed while the request was running.
+                    if let Some(t) = this.tabs.iter_mut().find(|t| t.id == id) {
+                        t.cancel = None;
+                        t.apply(result);
+                    }
                     cx.notify();
                 })
                 .ok();
             }
         })
         .detach();
-    }
-
-    fn apply(&mut self, result: Result<at_http::HttpResponse, HttpError>) {
-        match result {
-            Ok(resp) => {
-                let mut hs = resp.headers.clone();
-                hs.sort_by(|a, b| a.0.cmp(&b.0));
-                self.resp_headers = hs;
-                let ct = resp
-                    .headers
-                    .iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-                    .map(|(_, v)| v.clone())
-                    .unwrap_or_default();
-                match resp.body {
-                    ResponseBody::Memory(b) => {
-                        let first = b.iter().find(|ch| !ch.is_ascii_whitespace()).copied();
-                        let looks_json =
-                            ct.contains("json") || matches!(first, Some(b'{') | Some(b'['));
-                        let data = if looks_json {
-                            pretty_json(&b, 2)
-                        } else {
-                            b.to_vec()
-                        };
-                        self.set_view(data);
-                    }
-                    ResponseBody::File { path, len } => {
-                        let msg = format!(
-                            "The response body is {} and was saved to:\n{}\n\n(The viewer for large spilled bodies arrives in a later slice.)",
-                            human(len),
-                            path.display()
-                        );
-                        self.set_view(msg.into_bytes());
-                    }
-                }
-                self.status = Status::Done {
-                    code: resp.status,
-                    text: resp.status_text,
-                    ms: resp.elapsed.as_millis(),
-                    size: resp.size,
-                };
-            }
-            Err(HttpError::Cancelled) => self.status = Status::Error("Cancelled".into()),
-            Err(e) => self.status = Status::Error(e.to_string()),
-        }
     }
 }
 
@@ -1280,28 +1486,32 @@ impl Render for Workspace {
         // ---- viewer geometry (depends on the current window width) ----
         let avail = avail_width(window);
         let cols = (((avail / char_w()).floor() as usize).saturating_sub(1)).max(10);
-        if self.wrap {
-            if let Some(v) = self.view.as_mut() {
-                let stale = match &v.wrapped {
-                    Some((c, _)) => *c != cols,
-                    None => true,
-                };
-                if stale {
-                    let rows = build_rows(&v.data, cols);
-                    v.wrapped = Some((cols, Arc::new(rows)));
+        {
+            let tab = self.tab_mut();
+            if tab.wrap {
+                if let Some(v) = tab.view.as_mut() {
+                    let stale = match &v.wrapped {
+                        Some((c, _)) => *c != cols,
+                        None => true,
+                    };
+                    if stale {
+                        let rows = build_rows(&v.data, cols);
+                        v.wrapped = Some((cols, Arc::new(rows)));
+                    }
                 }
             }
+            let max_x = tab.max_scroll_x(avail);
+            if tab.scroll_x > max_x {
+                tab.scroll_x = max_x;
+            }
         }
-        let overflow = self
+        let tab = self.tab();
+        let overflow = tab
             .view
             .as_ref()
             .map(|v| v.longest_chars as f32 * char_w() > avail)
             .unwrap_or(false);
-        let max_x = self.max_scroll_x(avail);
-        if self.scroll_x > max_x {
-            self.scroll_x = max_x;
-        }
-        let scroll_x = if self.wrap { 0.0 } else { self.scroll_x };
+        let scroll_x = if tab.wrap { 0.0 } else { tab.scroll_x };
 
         let theme = cx.theme();
         let (bg, fg, muted, border, accent) = (
@@ -1311,7 +1521,51 @@ impl Render for Workspace {
             theme.border,
             theme.accent,
         );
-        let in_flight = self.cancel.is_some();
+        let in_flight = tab.cancel.is_some();
+
+        // ---- tab bar: one button per open request, ● marks unsaved changes ----
+        let mut tab_bar = div()
+            .id("tab-bar")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .pt_2()
+            .overflow_x_scroll();
+        for (ix, t) in self.tabs.iter().enumerate() {
+            let label = format!(
+                "{}{}{}",
+                if t.cancel.is_some() { "… " } else { "" },
+                if t.is_dirty(cx) { "● " } else { "" },
+                t.title(cx)
+            );
+            let b = Button::new(("tab", ix)).label(label);
+            let b = if ix == self.active { b.primary() } else { b };
+            tab_bar = tab_bar.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_none()
+                    .child(b.on_click(
+                        cx.listener(move |this, _ev, window, cx| this.activate_tab(ix, window, cx)),
+                    ))
+                    .child(
+                        Button::new(("tab-x", ix))
+                            .label(if t.confirm_close { "Discard?" } else { "✕" })
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                this.close_tab(ix, window, cx)
+                            })),
+                    ),
+            );
+        }
+        tab_bar = tab_bar.child(
+            div().flex_none().child(
+                Button::new("tab-new")
+                    .label("+")
+                    .on_click(cx.listener(|this, _ev, window, cx| this.add_tab(window, cx))),
+            ),
+        );
 
         let top = div()
             .flex()
@@ -1319,21 +1573,22 @@ impl Render for Workspace {
             .items_center()
             .gap_2()
             .p_2()
-            .child(div().w(px(180.)).flex_none().child(Input::new(&self.name)))
+            .child(div().w(px(180.)).flex_none().child(Input::new(&tab.name)))
             .child(
                 Button::new("method")
-                    .label(self.method.as_str())
+                    .label(tab.method.as_str())
                     .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.method = next_method(this.method);
+                        let tab = this.tab_mut();
+                        tab.method = next_method(tab.method);
                         cx.notify();
                     })),
             )
-            .child(div().flex_1().child(Input::new(&self.url)))
+            .child(div().flex_1().child(Input::new(&tab.url)))
             .child(
                 Button::new("send")
                     .primary()
                     .label(if in_flight { "Cancel" } else { "Send" })
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.on_send(cx))),
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.send_active(cx))),
             )
             .child(
                 Button::new("save")
@@ -1358,12 +1613,12 @@ impl Render for Workspace {
             );
 
         // ---- request editor: tabs + panel ----
-        let pcount = self
+        let pcount = tab
             .params
             .iter()
             .filter(|r| r.enabled && !r.key.read(cx).value().is_empty())
             .count();
-        let hcount = self
+        let hcount = tab
             .headers
             .iter()
             .filter(|r| r.enabled && !r.key.read(cx).value().is_empty())
@@ -1377,10 +1632,10 @@ impl Render for Workspace {
                 seg_btn(
                     "t-params",
                     format!("Params ({pcount})"),
-                    self.req_tab == ReqTab::Params,
+                    tab.req_tab == ReqTab::Params,
                 )
                 .on_click(cx.listener(|this, _ev, _window, cx| {
-                    this.req_tab = ReqTab::Params;
+                    this.tab_mut().req_tab = ReqTab::Params;
                     cx.notify();
                 })),
             )
@@ -1388,17 +1643,17 @@ impl Render for Workspace {
                 seg_btn(
                     "t-headers",
                     format!("Headers ({hcount})"),
-                    self.req_tab == ReqTab::Headers,
+                    tab.req_tab == ReqTab::Headers,
                 )
                 .on_click(cx.listener(|this, _ev, _window, cx| {
-                    this.req_tab = ReqTab::Headers;
+                    this.tab_mut().req_tab = ReqTab::Headers;
                     cx.notify();
                 })),
             )
             .child(
-                seg_btn("t-body", "Body".to_string(), self.req_tab == ReqTab::Body).on_click(
+                seg_btn("t-body", "Body".to_string(), tab.req_tab == ReqTab::Body).on_click(
                     cx.listener(|this, _ev, _window, cx| {
-                        this.req_tab = ReqTab::Body;
+                        this.tab_mut().req_tab = ReqTab::Body;
                         cx.notify();
                     }),
                 ),
@@ -1408,26 +1663,26 @@ impl Render for Workspace {
                 .id("req-panel")
                 .h(px(210.))
                 .overflow_y_scroll()
-                .child(match self.req_tab {
-                    ReqTab::Params => self.render_kv(Which::Params, cx).into_any_element(),
-                    ReqTab::Headers => self.render_kv(Which::Headers, cx).into_any_element(),
+                .child(match tab.req_tab {
+                    ReqTab::Params => self.render_kv(tab, Which::Params, cx).into_any_element(),
+                    ReqTab::Headers => self.render_kv(tab, Which::Headers, cx).into_any_element(),
                     ReqTab::Body => div()
                         .p_2()
                         .h_full()
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .children((!has_body(self.method)).then(|| {
+                        .children((!has_body(tab.method)).then(|| {
                             div().text_color(muted).child(format!(
                                 "{} requests don't send a body.",
-                                self.method.as_str()
+                                tab.method.as_str()
                             ))
                         }))
-                        .child(div().flex_1().child(Input::new(&self.body).h_full()))
+                        .child(div().flex_1().child(Input::new(&tab.body).h_full()))
                         .into_any_element(),
                 });
 
-        let (status_text, status_col): (String, Hsla) = match &self.status {
+        let (status_text, status_col): (String, Hsla) = match &tab.status {
             Status::Idle => ("Ready".into(), muted),
             Status::Loading => ("Sending…".into(), muted),
             Status::Info(m) => (m.clone(), muted),
@@ -1444,14 +1699,15 @@ impl Render for Workspace {
         };
 
         // The wrap toggle appears only when text overflows the window (or while wrap is on).
-        let wrap_btn = (self.res_tab == ResTab::Body && (self.wrap || overflow)).then(|| {
+        let wrap_btn = (tab.res_tab == ResTab::Body && (tab.wrap || overflow)).then(|| {
             Button::new("wrap")
-                .label(if self.wrap { "Wrap: on" } else { "Wrap: off" })
+                .label(if tab.wrap { "Wrap: on" } else { "Wrap: off" })
                 .on_click(cx.listener(|this, _ev, _window, cx| {
-                    this.wrap = !this.wrap;
-                    this.scroll_x = 0.0;
-                    if !this.wrap {
-                        if let Some(v) = this.view.as_mut() {
+                    let tab = this.tab_mut();
+                    tab.wrap = !tab.wrap;
+                    tab.scroll_x = 0.0;
+                    if !tab.wrap {
+                        if let Some(v) = tab.view.as_mut() {
                             v.wrapped = None;
                         }
                     }
@@ -1460,14 +1716,15 @@ impl Render for Workspace {
         });
 
         // Copy the (pretty-printed) response body to the clipboard (FR-RES-01).
-        let copy_btn = (self.res_tab == ResTab::Body && self.view.is_some()).then(|| {
+        let copy_btn = (tab.res_tab == ResTab::Body && tab.view.is_some()).then(|| {
             Button::new("copy")
-                .label(if self.copied { "Copied ✓" } else { "Copy" })
+                .label(if tab.copied { "Copied ✓" } else { "Copy" })
                 .on_click(cx.listener(|this, _ev, _window, cx| {
-                    if let Some(v) = &this.view {
+                    let tab = this.tab_mut();
+                    if let Some(v) = &tab.view {
                         let text = String::from_utf8_lossy(&v.data).into_owned();
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
-                        this.copied = true;
+                        tab.copied = true;
                         cx.notify();
                     }
                 }))
@@ -1487,7 +1744,7 @@ impl Render for Workspace {
                     .gap_3()
                     .child(div().text_color(status_col).child(status_text))
                     .children(
-                        self.warning
+                        tab.warning
                             .clone()
                             .map(|w| div().text_color(c(0xf9e2af)).child(w)),
                     ),
@@ -1498,20 +1755,20 @@ impl Render for Workspace {
                     .flex_row()
                     .gap_1()
                     .child(
-                        seg_btn("r-body", "Body".to_string(), self.res_tab == ResTab::Body)
+                        seg_btn("r-body", "Body".to_string(), tab.res_tab == ResTab::Body)
                             .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.res_tab = ResTab::Body;
+                                this.tab_mut().res_tab = ResTab::Body;
                                 cx.notify();
                             })),
                     )
                     .child(
                         seg_btn(
                             "r-headers",
-                            format!("Headers ({})", self.resp_headers.len()),
-                            self.res_tab == ResTab::Headers,
+                            format!("Headers ({})", tab.resp_headers.len()),
+                            tab.res_tab == ResTab::Headers,
                         )
                         .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.res_tab = ResTab::Headers;
+                            this.tab_mut().res_tab = ResTab::Headers;
                             cx.notify();
                         })),
                     )
@@ -1519,9 +1776,9 @@ impl Render for Workspace {
                     .children(wrap_btn),
             );
 
-        let viewer = match &self.view {
+        let viewer = match &tab.view {
             Some(v) => {
-                let rows = if self.wrap {
+                let rows = if tab.wrap {
                     v.wrapped
                         .as_ref()
                         .map(|(_, r)| r.clone())
@@ -1587,7 +1844,7 @@ impl Render for Workspace {
                 .into_any_element(),
         };
 
-        let resp_area = match self.res_tab {
+        let resp_area = match tab.res_tab {
             ResTab::Body => viewer,
             ResTab::Headers => div()
                 .id("resp-headers")
@@ -1597,7 +1854,7 @@ impl Render for Workspace {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .children(self.resp_headers.iter().map(|(k, v)| {
+                .children(tab.resp_headers.iter().map(|(k, v)| {
                     div()
                         .flex()
                         .flex_row()
@@ -1630,9 +1887,9 @@ impl Render for Workspace {
         }
         for (ix, item) in self.items.iter().enumerate() {
             let selected = match item.kind {
-                ItemKind::Request => self.current_path.as_ref() == Some(&item.path),
+                ItemKind::Request => tab.current_path.as_ref() == Some(&item.path),
                 ItemKind::Collection | ItemKind::Folder => {
-                    self.current_path.is_none() && self.save_dir.as_ref() == Some(&item.path)
+                    tab.current_path.is_none() && tab.save_dir.as_ref() == Some(&item.path)
                 }
                 ItemKind::Broken(_) => false,
             };
@@ -1685,6 +1942,7 @@ impl Render for Workspace {
             .h_full()
             .flex()
             .flex_col()
+            .child(tab_bar)
             .child(top)
             .child(req_tabs)
             .child(req_panel)
@@ -1697,7 +1955,8 @@ impl Render for Workspace {
                     .text_size(px(13.))
                     // horizontal scrolling is ours (so the gutter can stay put); vertical is the list's
                     .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, cx| {
-                        if this.wrap || this.res_tab != ResTab::Body {
+                        let tab = this.tab_mut();
+                        if tab.wrap || tab.res_tab != ResTab::Body {
                             return;
                         }
                         let d = ev.delta.pixel_delta(px(18.));
@@ -1708,8 +1967,8 @@ impl Render for Workspace {
                         if dx == 0.0 {
                             return;
                         }
-                        let max = this.max_scroll_x(avail_width(window));
-                        this.scroll_x = (this.scroll_x - dx).clamp(0.0, max);
+                        let max = tab.max_scroll_x(avail_width(window));
+                        tab.scroll_x = (tab.scroll_x - dx).clamp(0.0, max);
                         cx.notify();
                     }))
                     .child(resp_area),
@@ -1723,7 +1982,18 @@ impl Render for Workspace {
             .text_color(fg)
             .key_context("Workspace")
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &SendRequest, _window, cx| this.on_send(cx)))
+            .on_action(cx.listener(|this, _: &SendRequest, _window, cx| this.send_active(cx)))
+            .on_action(cx.listener(|this, _: &NewTab, window, cx| {
+                if this.main_view == MainView::Request {
+                    this.add_tab(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                if this.main_view == MainView::Request {
+                    let ix = this.active;
+                    this.close_tab(ix, window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &SaveRequest, window, cx| this.on_save(window, cx)))
             .child(sidebar)
             .child(if self.main_view == MainView::Environments {
@@ -1746,12 +2016,14 @@ fn main() {
     Application::new().run(move |cx: &mut App| {
         gpui_component::init(cx);
         #[cfg(target_os = "macos")]
-        let (send_key, save_key) = ("cmd-enter", "cmd-s");
+        let (send_key, save_key, new_key, close_key) = ("cmd-enter", "cmd-s", "cmd-t", "cmd-w");
         #[cfg(not(target_os = "macos"))]
-        let (send_key, save_key) = ("ctrl-enter", "ctrl-s");
+        let (send_key, save_key, new_key, close_key) = ("ctrl-enter", "ctrl-s", "ctrl-t", "ctrl-w");
         cx.bind_keys([
             KeyBinding::new(send_key, SendRequest, None),
             KeyBinding::new(save_key, SaveRequest, None),
+            KeyBinding::new(new_key, NewTab, None),
+            KeyBinding::new(close_key, CloseTab, None),
         ]);
         let bounds = Bounds::centered(None, size(px(1100.), px(760.)), cx);
         cx.open_window(
@@ -1768,4 +2040,42 @@ fn main() {
         cx.activate(true);
     });
     drop(rt);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_titles() {
+        assert_eq!(tab_title("Get users"), "Get users");
+        assert_eq!(tab_title("  padded  "), "padded");
+        assert_eq!(tab_title(""), "Untitled");
+        assert_eq!(tab_title("   "), "Untitled");
+        let long = "a".repeat(TAB_TITLE_MAX + 10);
+        let t = tab_title(&long);
+        assert_eq!(t.chars().count(), TAB_TITLE_MAX);
+        assert!(t.ends_with('…'));
+        // exactly at the limit is left alone
+        let exact = "b".repeat(TAB_TITLE_MAX);
+        assert_eq!(tab_title(&exact), exact);
+        // multi-byte characters are counted as characters, never split
+        let wide = "é".repeat(TAB_TITLE_MAX + 5);
+        assert_eq!(tab_title(&wide).chars().count(), TAB_TITLE_MAX);
+    }
+
+    #[test]
+    fn active_tab_after_closing() {
+        // closing a tab left of the active one shifts the active index down
+        assert_eq!(active_after_close(2, 0, 3), 1);
+        // closing the active tab selects its right neighbour (same index)
+        assert_eq!(active_after_close(1, 1, 3), 1);
+        // closing the active last tab selects the new last one
+        assert_eq!(active_after_close(2, 2, 2), 1);
+        // closing a tab right of the active one changes nothing
+        assert_eq!(active_after_close(0, 2, 2), 0);
+        // closing the only tab (a fresh one is added by the caller)
+        assert_eq!(active_after_close(0, 0, 1), 0);
+        assert_eq!(active_after_close(0, 0, 0), 0);
+    }
 }

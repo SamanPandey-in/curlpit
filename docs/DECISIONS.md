@@ -68,3 +68,14 @@ Tabs are plain buttons (primary = selected) rather than gpui-component's TabBar,
 - **URL scheme default:** `https://` is prepended only if the URL has no `://` *after* variable substitution, so `{{base}}/users` works when `base` contains a scheme.
 - **Empty spare rows** in Params/Headers are no longer written into saved request files.
 - **Copy response body** button (pretty-printed text) added to the response bar.
+
+## D26: request tabs (2026-10-29)
+- **State model:** everything that belongs to one request (editor inputs, saved path, status line, response viewer, wrap/scroll, in-flight cancel token, unresolved-variable warning) moved from `Workspace` into a `RequestTab`. `Workspace` keeps the tabs, the active index, the sidebar, storage and environments. Tabs are fully independent, so requests can run in several tabs at once.
+- **Identity:** each tab has a stable `id`; a finished request finds its tab by id, not index, so closing or reordering tabs never misroutes a response. If the tab is gone the result is dropped (closing a tab also cancels its request).
+- **Unsaved detection:** a snapshot of the editor (`current_request()`) is taken on open and on save; the tab is unsaved when the current editor differs. Comparing editor-to-editor (not file-to-editor) means fields the UI can't show yet (auth, settings) never cause false `●`. Cost: one `Request` build per tab per render, which is fine for tens of tabs; if bodies get huge we'll switch to an edit counter driven by input events.
+- **Closing:** an unsaved tab needs a second click (`Discard?`), the same two-step pattern as deleting an environment (D25). There is always at least one tab.
+- **Opening from the sidebar:** focus the tab already showing that file, else reuse an untouched tab (never edited, saved or sent), else open a new one. No duplicates of the same file.
+- **Clicking a collection/folder** still re-targets the active tab's next Save into that folder as a new file (behaviour from 3a, S6), i.e. it works as "save as" for that tab.
+- **Not persisted yet:** open tabs aren't restored after restart and there is no quit warning for unsaved tabs; both are queued for after history.
+- **Shortcuts:** Cmd/Ctrl+T new tab, Cmd/Ctrl+W close tab. No app menu exists yet, so Cmd+W doesn't conflict with a window-close item.
+- Removed the write-only `current_col` / `SidebarItem::col` fields.
