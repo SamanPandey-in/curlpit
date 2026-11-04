@@ -118,6 +118,44 @@ impl Default for Settings {
     }
 }
 
+/// The open tabs, kept in `<data-dir>/session.toml` so they come back after a restart,
+/// unsaved edits included ("hot exit").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Session {
+    #[serde(default = "current_schema")]
+    pub schema_version: u32,
+    /// Index of the active tab.
+    #[serde(default)]
+    pub active: usize,
+    #[serde(default)]
+    pub tabs: Vec<SessionTab>,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            active: 0,
+            tabs: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionTab {
+    /// The request file this tab is linked to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Folder the next Save goes to when the tab has no file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_dir: Option<PathBuf>,
+    /// The editor contents had changes that weren't saved.
+    #[serde(default)]
+    pub unsaved: bool,
+    /// What the editor showed.
+    pub draft: Request,
+}
+
 /// An environment together with the file it lives in.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnvEntry {
@@ -209,6 +247,43 @@ pub fn slug(name: &str) -> String {
     out
 }
 
+/// A folder name that is safe on every OS but still reads like the original: characters that
+/// are forbidden in file names become `-`, leading dots (hidden files) and trailing dots/spaces
+/// (rejected on Windows) are dropped, and Windows device names get a suffix.
+pub fn folder_name(name: &str) -> String {
+    let mut out: String = name
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+            {
+                '-'
+            } else {
+                ch
+            }
+        })
+        .collect();
+    while out.starts_with('.') {
+        out.remove(0);
+    }
+    while out.ends_with('.') || out.ends_with(' ') {
+        out.pop();
+    }
+    let out = out.trim().to_string();
+    if out.is_empty() {
+        return "Untitled folder".into();
+    }
+    let lower = out.to_lowercase();
+    let reserved = matches!(lower.as_str(), "con" | "prn" | "aux" | "nul")
+        || ((lower.starts_with("com") || lower.starts_with("lpt"))
+            && lower.len() == 4
+            && lower.as_bytes()[3].is_ascii_digit());
+    if reserved {
+        return format!("{out} folder");
+    }
+    out
+}
+
 fn unique_path(dir: &Path, slug: &str, ext: &str, replace: Option<&Path>) -> PathBuf {
     let mut n = 1u32;
     loop {
@@ -264,8 +339,35 @@ impl Store {
         Ok(Store { root, data_dir })
     }
 
+    /// `<data-dir>/collections`.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// `<data-dir>` itself (environments, settings, history live here).
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    /// Create a sub-folder of a collection or folder. The display name is kept readable (case and
+    /// spaces preserved; only characters that are unsafe in file names are replaced). Collisions
+    /// get ` 2`, ` 3`, ...
+    pub fn create_folder(parent: &Path, name: &str) -> Result<PathBuf, StoreError> {
+        let base = folder_name(name);
+        let mut n = 1u32;
+        let dir = loop {
+            let cand = if n == 1 {
+                parent.join(&base)
+            } else {
+                parent.join(format!("{base} {n}"))
+            };
+            if !cand.exists() {
+                break cand;
+            }
+            n += 1;
+        };
+        fs::create_dir_all(&dir).map_err(io(&dir))?;
+        Ok(dir)
     }
 
     pub fn collection_dir(&self, dir_name: &str) -> PathBuf {
@@ -556,6 +658,35 @@ impl Store {
         })?;
         atomic_write(&path, &text)
     }
+
+    pub fn session_path(&self) -> PathBuf {
+        self.data_dir.join("session.toml")
+    }
+
+    /// The last session, `None` if there is none yet. A file from a newer app version is an
+    /// error (the caller must then not overwrite it); a corrupt one is an error too.
+    pub fn load_session(&self) -> Result<Option<Session>, StoreError> {
+        let path = self.session_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let text = Store::read_versioned(&path)?;
+        toml::from_str::<Session>(&text)
+            .map(Some)
+            .map_err(|e| StoreError::Parse {
+                path,
+                msg: e.to_string(),
+            })
+    }
+
+    pub fn save_session(&self, s: &Session) -> Result<(), StoreError> {
+        let path = self.session_path();
+        let text = toml::to_string_pretty(s).map_err(|e| StoreError::Serialize {
+            path: path.clone(),
+            msg: e.to_string(),
+        })?;
+        atomic_write(&path, &text)
+    }
 }
 
 #[cfg(test)]
@@ -569,6 +700,113 @@ mod tests {
             url: url.into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn scripts_roundtrip_and_stay_readable() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        let col = store.create_collection("S").unwrap();
+        let r = Request {
+            name: "Scripted".into(),
+            url: "https://s.test".into(),
+            pre_request_script: "pm.variables.set(\"ts\", Date.now());\n// done".into(),
+            test_script: "pm.test(\"ok\", () => pm.response.to.be.ok);".into(),
+            headers: vec![KeyValue::new("A", "1")],
+            ..Default::default()
+        };
+        let path = Store::save_request(&col.dir, &r, None).unwrap();
+        assert_eq!(Store::load_request(&path).unwrap(), r);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("pre_request_script"), "{text}");
+        // requests without scripts don't grow empty keys
+        let plain = Store::save_request(&col.dir, &req("Plain", "https://p.test"), None).unwrap();
+        assert!(!std::fs::read_to_string(plain).unwrap().contains("script"));
+    }
+
+    #[test]
+    fn session_roundtrip_missing_corrupt_and_too_new() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        assert_eq!(store.load_session().unwrap(), None);
+
+        let rich = Request {
+            name: "Draft".into(),
+            method: Method::Post,
+            url: "https://{{host}}/x".into(),
+            headers: vec![KeyValue::new("A", "1")],
+            body: Body::FormData {
+                fields: vec![FormField {
+                    key: "f".into(),
+                    value: FormValue::File {
+                        path: "/tmp/a.png".into(),
+                    },
+                    enabled: true,
+                }],
+            },
+            auth: Auth::Basic {
+                username: "u".into(),
+                password: "p".into(),
+            },
+            ..Default::default()
+        };
+        let s = Session {
+            active: 1,
+            tabs: vec![
+                SessionTab {
+                    path: Some(t.path().join("collections/c/a.toml")),
+                    save_dir: None,
+                    unsaved: false,
+                    draft: req("A", "https://a.test"),
+                },
+                SessionTab {
+                    path: None,
+                    save_dir: Some(t.path().join("collections/c")),
+                    unsaved: true,
+                    draft: rich,
+                },
+            ],
+            ..Default::default()
+        };
+        store.save_session(&s).unwrap();
+        assert_eq!(store.load_session().unwrap(), Some(s.clone()));
+
+        std::fs::write(store.session_path(), "= nope").unwrap();
+        assert!(store.load_session().is_err());
+
+        std::fs::write(store.session_path(), "schema_version = 99\n").unwrap();
+        assert!(matches!(
+            store.load_session(),
+            Err(StoreError::TooNew { found: 99, .. })
+        ));
+    }
+
+    #[test]
+    fn folder_names_stay_readable_and_safe() {
+        assert_eq!(folder_name("User Management"), "User Management");
+        assert_eq!(folder_name("  a/b:c?  "), "a-b-c-");
+        assert_eq!(folder_name("..hidden"), "hidden");
+        assert_eq!(folder_name("trailing. . "), "trailing");
+        assert_eq!(folder_name("   "), "Untitled folder");
+        assert_eq!(folder_name("CON"), "CON folder");
+        assert_eq!(folder_name("Console"), "Console");
+    }
+
+    #[test]
+    fn create_folder_dedupes_and_shows_in_tree() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        let col = store.create_collection("API").unwrap();
+        let a = Store::create_folder(&col.dir, "Users").unwrap();
+        let b = Store::create_folder(&col.dir, "Users").unwrap();
+        assert_eq!(a.file_name().unwrap(), "Users");
+        assert_eq!(b.file_name().unwrap(), "Users 2");
+        Store::save_request(&a, &req("List", "https://x.test"), None).unwrap();
+        let tree = Store::load_tree(&col.dir).unwrap();
+        assert!(
+            matches!(&tree[0], Node::Folder { name, children, .. } if name == "Users" && children.len() == 1)
+        );
+        assert_eq!(store.data_dir(), t.path());
     }
 
     #[test]

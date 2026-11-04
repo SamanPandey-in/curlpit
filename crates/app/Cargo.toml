@@ -12,6 +12,10 @@ path = "src/main.rs"
 at-core = { path = "../core" }
 at-http = { path = "../http" }
 at-store = { path = "../store" }
+at-history = { path = "../history" }
+at-interop = { path = "../interop" }
+at-codegen = { path = "../codegen" }
+at-script = { path = "../script" }
 gpui = { version = "0.2", features = ["runtime_shaders"] }
 gpui-component = "0.5"
 tokio.workspace = true

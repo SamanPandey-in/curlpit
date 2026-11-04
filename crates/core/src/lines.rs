@@ -58,6 +58,37 @@ impl RowIndex {
         }
         best_ix
     }
+
+    /// The row that contains byte `offset` (the last row for offsets past the end).
+    pub fn row_of(&self, offset: usize) -> usize {
+        self.starts
+            .partition_point(|&s| s as usize <= offset)
+            .saturating_sub(1)
+    }
+}
+
+/// Byte offsets of non-overlapping matches of `needle` in `hay`, ASCII case-insensitive,
+/// at most `limit` of them (searching stops there, so a huge body stays fast).
+pub fn find_all(hay: &[u8], needle: &str, limit: usize) -> Vec<usize> {
+    let n = needle.as_bytes();
+    let mut out = Vec::new();
+    if n.is_empty() || n.len() > hay.len() || limit == 0 {
+        return out;
+    }
+    let first = n[0].to_ascii_lowercase();
+    let mut i = 0;
+    while i + n.len() <= hay.len() {
+        if hay[i].to_ascii_lowercase() == first && hay[i..i + n.len()].eq_ignore_ascii_case(n) {
+            out.push(i);
+            if out.len() >= limit {
+                break;
+            }
+            i += n.len();
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Number of characters (not bytes) in a UTF-8 slice.
@@ -99,6 +130,31 @@ pub fn build_rows(b: &[u8], max_chars: usize) -> RowIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_and_locate_matches() {
+        let text = b"Hello world\n\"name\": \"HELLO\"\nhello-hello";
+        let hits = find_all(text, "hello", 100);
+        assert_eq!(hits, vec![0, 21, 28, 34]);
+        assert_eq!(find_all(text, "hello", 2), vec![0, 21], "limit");
+        assert!(find_all(text, "", 10).is_empty());
+        assert!(find_all(b"ab", "abc", 10).is_empty());
+        // non-overlapping
+        assert_eq!(find_all(b"aaaa", "aa", 10), vec![0, 2]);
+        // multi-byte text is matched byte-exact
+        assert_eq!(find_all("café café".as_bytes(), "café", 10), vec![0, 6]);
+
+        let rows = build_rows(text, MAX_ROW_CHARS);
+        assert_eq!(rows.row_of(0), 0);
+        assert_eq!(rows.row_of(21), 1);
+        assert_eq!(rows.row_of(34), 2);
+        assert_eq!(rows.row_of(10_000), 2, "past the end -> last row");
+
+        // wrapped rows: the match lands on the continuation row that holds it
+        let wrapped = build_rows(b"abcdefghij", 4);
+        assert_eq!(wrapped.row_of(5), 1);
+        assert_eq!(wrapped.row_of(9), 2);
+    }
 
     fn rows_text(b: &[u8], r: &RowIndex) -> Vec<Vec<u8>> {
         (0..r.len()).map(|i| r.row(b, i).to_vec()).collect()

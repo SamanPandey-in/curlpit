@@ -42,6 +42,16 @@ fn has_header(h: &[(String, String)], name: &str) -> bool {
 }
 
 pub fn build(req: &Request, vars: &Variables) -> Result<Built, BuildError> {
+    build_inner(req, vars, true)
+}
+
+/// Like [`build`], but the URL may still start with an unresolved `{{variable}}`. Used for code
+/// snippets that keep placeholders; never for sending.
+pub fn build_template(req: &Request, vars: &Variables) -> Result<Built, BuildError> {
+    build_inner(req, vars, false)
+}
+
+fn build_inner(req: &Request, vars: &Variables, require_scheme: bool) -> Result<Built, BuildError> {
     let mut unresolved: Vec<String> = Vec::new();
     let mut r = |s: &str| -> String {
         let res = vars.resolve(s);
@@ -59,7 +69,7 @@ pub fn build(req: &Request, vars: &Variables) -> Result<Built, BuildError> {
         return Err(BuildError::EmptyUrl);
     }
     let lower = raw_url.to_ascii_lowercase();
-    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+    if require_scheme && !(lower.starts_with("http://") || lower.starts_with("https://")) {
         return Err(BuildError::InvalidUrl(raw_url));
     }
     let (mut url, fragment) = match raw_url.split_once('#') {
@@ -214,6 +224,14 @@ pub fn build(req: &Request, vars: &Variables) -> Result<Built, BuildError> {
         }
     }
 
+    // Placeholders in params were percent-encoded with everything else; in a template they
+    // should read as `{{name}}` again.
+    let url = if require_scheme {
+        url
+    } else {
+        url.replace("%7B%7B", "{{").replace("%7D%7D", "}}")
+    };
+
     Ok(Built {
         method: req.method,
         url,
@@ -229,6 +247,23 @@ mod tests {
 
     fn kv(k: &str, v: &str) -> KeyValue {
         KeyValue::new(k, v)
+    }
+
+    #[test]
+    fn template_build_keeps_placeholder_urls() {
+        let req = Request {
+            url: "{{base}}/users".into(),
+            params: vec![kv("q", "{{term}}")],
+            ..Default::default()
+        };
+        let vars = Variables::default();
+        assert!(matches!(build(&req, &vars), Err(BuildError::InvalidUrl(_))));
+        let b = build_template(&req, &vars).unwrap();
+        assert_eq!(b.url, "{{base}}/users?q={{term}}");
+        assert_eq!(b.unresolved, vec!["base".to_string(), "term".to_string()]);
+        // an empty URL is still an error
+        let empty = Request::default();
+        assert_eq!(build_template(&empty, &vars), Err(BuildError::EmptyUrl));
     }
 
     #[test]

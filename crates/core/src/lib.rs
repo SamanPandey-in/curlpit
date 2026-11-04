@@ -7,7 +7,7 @@ pub mod models;
 pub mod pretty;
 pub mod vars;
 
-pub use build::{build, BuildError, Built, BuiltBody, BuiltPart};
+pub use build::{build, build_template, BuildError, Built, BuiltBody, BuiltPart};
 pub use env::{to_map, EnvVar, Environment};
 pub use models::*;
 pub use vars::{Resolved, Variables};

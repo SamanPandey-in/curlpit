@@ -1,0 +1,14 @@
+[package]
+name = "at-script"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "at_script"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+# QuickJS (D10): small, fast to start, sandboxed; the Phase 0 spike verified containment.
+rquickjs = "0.14"
