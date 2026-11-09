@@ -1,0 +1,16 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+import requests
+
+url = "https://api.test/unicode"
+headers = {
+    "X-Emoji": "😀",
+    "Content-Type": "application/json",
+}
+data = "{\"emoji\": \"😀🏳️‍🌈\", \"zwj\": \"👨‍👩‍👧\", \"math\": \"𝒳𝓇\", \"combining\": \"école\", \"cjk\": \"漢字\", \"rtl\": \"مرحبا\"}"
+
+response = requests.request("POST", url, headers=headers, data=data.encode("utf-8"))
+print(response.status_code)
+print(response.text)

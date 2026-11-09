@@ -4210,6 +4210,12 @@ impl Workspace {
     /// The active tab's request as code in the chosen language, plus whether the snippet
     /// contains resolved secret values.
     fn code_snippet(&self, cx: &App) -> Result<(String, bool), String> {
+        self.snippet_for(self.code_lang, cx)
+    }
+
+    /// The active tab's request as code in `lang`, plus whether the snippet holds resolved
+    /// secret values. Shared by the Code view and "Copy cURL" (FR-IE-08).
+    fn snippet_for(&self, lang: Lang, cx: &App) -> Result<(String, bool), String> {
         let vars = self.variables();
         let req = sendable(self.tab().current_request(cx), &vars);
         let none = Variables::default();
@@ -4225,7 +4231,25 @@ impl Workspace {
                 .unwrap_or_default();
             self.secret_names().iter().any(|s| used.contains(s))
         };
-        Ok((generate(&built, self.code_lang), has_secret))
+        Ok((generate(&built, lang), has_secret))
+    }
+
+    /// Copy the active tab's request as a cURL command (FR-IE-08). It honours the Code
+    /// view's values-or-placeholders toggle, so a snippet meant for sharing stays shareable.
+    fn on_copy_curl(&mut self, cx: &mut Context<Self>) {
+        match self.snippet_for(Lang::Curl, cx) {
+            Ok((code, has_secret)) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(code));
+                let msg = if has_secret {
+                    "Copied as cURL. It contains secret values; switch Code to \"Variables: {{kept}}\" for a shareable snippet."
+                } else {
+                    "Copied as cURL."
+                };
+                self.tab_mut().status = Status::Info(msg.to_string());
+            }
+            Err(e) => self.tab_mut().status = Status::Error(format!("Copy as cURL: {e}")),
+        }
+        cx.notify();
     }
 
     /// Open the cURL command on the clipboard as a new (unsaved) request.
@@ -5221,6 +5245,11 @@ impl Render for Workspace {
                 Button::new("save")
                     .label("Save")
                     .on_click(cx.listener(|this, _ev, window, cx| this.on_save(window, cx))),
+            )
+            .child(
+                Button::new("copy-curl")
+                    .label("Copy cURL")
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.on_copy_curl(cx))),
             )
             .child(
                 Button::new("env-pick")

@@ -1,0 +1,32 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+package main
+
+import (
+	"fmt"
+	"io"
+	"net/http"
+)
+
+func main() {
+	req, err := http.NewRequest("GET", "https://api.test/dupes", nil)
+	if err != nil {
+		panic(err)
+	}
+	req.Header.Add("Accept", "application/json")
+	req.Header.Add("Accept", "text/plain; q=0.5")
+	req.Header.Add("X-Sig", "first")
+	req.Header.Add("X-Sig", "second")
+	req.Header.Add("X-Ts", "1699999999")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	fmt.Println(resp.Status)
+	fmt.Println(string(out))
+}

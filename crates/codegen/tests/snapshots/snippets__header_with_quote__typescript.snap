@@ -1,0 +1,19 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+const url = "https://api.test/headers";
+const headers: Record<string, string> = {
+  "X-Quote": "he said \"hi\" and it's 'fine'",
+  "X-Dollar": "cost $5 {$x} ${y} `tick`",
+  "X-Backslash": "C:\\path\\to\\thing",
+};
+
+const options: RequestInit = {
+  method: "GET",
+  headers,
+};
+
+const res: Response = await fetch(url, options);
+console.log(res.status);
+console.log(await res.text());

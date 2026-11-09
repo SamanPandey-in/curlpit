@@ -1,0 +1,26 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: report
+---
+input bytes: 307229
+cURL        bytes=338126   fnv1a=56c97575abf01f3a
+  head="curl -X POST 'https://big.test/ingest' \\\n  -H 'Content-Type: text/plai"
+  tail="\n{\"i\":10267,\"s\":\"a'\\''b\\\"c#d`e$f\"}\n{\"i\":10268,\"s\":\"a'\\''b\\\"c#d`e$f\"}\n'"
+Python      bytes=399892   fnv1a=5e41ce31a23ffe57
+  head="import requests\n\nurl = \"https://big.test/ingest\"\nheaders = {\n    \"Cont"
+  tail="ata.encode(\"utf-8\"))\nprint(response.status_code)\nprint(response.text)\n"
+JavaScript  bytes=399861   fnv1a=a834626b53793ec7
+  head="const response = await fetch(\"https://big.test/ingest\", {\n  method: \"P"
+  tail=");\n\nconsole.log(response.status);\nconsole.log(await response.text());\n"
+TypeScript  bytes=399969   fnv1a=45ccad5985e8136a
+  head="const url = \"https://big.test/ingest\";\nconst headers: Record<string, s"
+  tail="rl, options);\nconsole.log(res.status);\nconsole.log(await res.text());\n"
+Go          bytes=400079   fnv1a=b48731e75cc562ee
+  head="package main\n\nimport (\n\t\"fmt\"\n\t\"io\"\n\t\"net/http\"\n\t\"strings\"\n)\n\nfunc mai"
+  tail="dAll(resp.Body)\n\tfmt.Println(resp.Status)\n\tfmt.Println(string(out))\n}\n"
+Rust        bytes=307649   fnv1a=53195615cf4a0467
+  head="// Cargo.toml: reqwest = { version = \"0.12\", features = [\"blocking\"] }"
+  tail="esponse.status());\n    println!(\"{}\", response.text()?);\n    Ok(())\n}\n"
+PHP         bytes=410336   fnv1a=f36027e5e5124f70
+  head="<?php\n\n$ch = curl_init();\ncurl_setopt_array($ch, [\n    CURLOPT_URL => "
+  tail="SE_CODE);\ncurl_close($ch);\n\necho $status, \"\\n\";\necho $response, \"\\n\";\n"

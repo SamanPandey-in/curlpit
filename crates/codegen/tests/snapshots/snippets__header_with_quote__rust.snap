@@ -1,0 +1,17 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+// Cargo.toml: reqwest = { version = "0.12", features = ["blocking"] }
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let response = reqwest::blocking::Client::new()
+        .request(reqwest::Method::GET, "https://api.test/headers")
+        .header("X-Quote", r#"he said "hi" and it's 'fine'"#)
+        .header("X-Dollar", "cost $5 {$x} ${y} `tick`")
+        .header("X-Backslash", r#"C:\path\to\thing"#)
+        .send()?;
+    println!("{}", response.status());
+    println!("{}", response.text()?);
+    Ok(())
+}

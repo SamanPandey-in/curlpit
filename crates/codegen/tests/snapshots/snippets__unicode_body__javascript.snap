@@ -1,0 +1,15 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+const response = await fetch("https://api.test/unicode", {
+  method: "POST",
+  headers: {
+    "X-Emoji": "😀",
+    "Content-Type": "application/json",
+  },
+  body: "{\"emoji\": \"😀🏳️‍🌈\", \"zwj\": \"👨‍👩‍👧\", \"math\": \"𝒳𝓇\", \"combining\": \"école\", \"cjk\": \"漢字\", \"rtl\": \"مرحبا\"}",
+});
+
+console.log(response.status);
+console.log(await response.text());

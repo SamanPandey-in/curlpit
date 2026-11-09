@@ -1,0 +1,10 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+const response = await fetch("https://api.test/search?q=a%20b%20%26%20c%3Dd&page=2&tag=caf%C3%A9%2F%F0%9F%98%80", {
+  method: "GET",
+});
+
+console.log(response.status);
+console.log(await response.text());

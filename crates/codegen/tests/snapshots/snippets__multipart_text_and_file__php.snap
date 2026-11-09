@@ -1,0 +1,23 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+<?php
+
+$ch = curl_init();
+curl_setopt_array($ch, [
+    CURLOPT_URL => "https://up.test/u",
+    CURLOPT_CUSTOMREQUEST => "PUT",
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_POSTFIELDS => [
+        "note" => "it's \"fine\" \$here",
+        "upload" => new CURLFile("/tmp/a b's \"file\".png"),
+    ],
+]);
+
+$response = curl_exec($ch);
+$status = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+curl_close($ch);
+
+echo $status, "\n";
+echo $response, "\n";

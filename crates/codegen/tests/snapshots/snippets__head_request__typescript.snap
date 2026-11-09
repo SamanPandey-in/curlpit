@@ -1,0 +1,17 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+const url = "https://api.test/resource";
+const headers: Record<string, string> = {
+  "If-None-Match": "\"etag-1\"",
+};
+
+const options: RequestInit = {
+  method: "HEAD",
+  headers,
+};
+
+const res: Response = await fetch(url, options);
+console.log(res.status);
+console.log(await res.text());

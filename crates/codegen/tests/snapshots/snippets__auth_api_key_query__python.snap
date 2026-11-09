@@ -1,0 +1,11 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+import requests
+
+url = "https://api.test/me?v=1&api_key=k%20ey%2642"
+
+response = requests.request("GET", url)
+print(response.status_code)
+print(response.text)
