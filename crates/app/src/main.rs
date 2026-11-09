@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use at_codegen::{generate, parse_curl, Lang};
+use at_core::json_tree::{CollapseState, JsonTree, Kind};
 use at_core::lines::{build_rows, count_chars, find_all, RowIndex, CONT, MAX_ROW_CHARS};
 use at_core::{
     build, build_template, pretty::pretty_json, to_map, ApiKeyLocation, Auth, Body, EnvVar,
@@ -21,9 +22,10 @@ use at_script::{
 };
 use at_store::{slug, Node, Session, SessionTab, Settings, Store, StoreError};
 use gpui::{
-    actions, div, prelude::*, px, rgb, size, uniform_list, App, Application, Bounds, ClipboardItem,
-    Context, Entity, FocusHandle, Hsla, KeyBinding, PathPromptOptions, ScrollStrategy,
-    ScrollWheelEvent, Subscription, UniformListScrollHandle, Window, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, rgb, size, uniform_list, AnyElement, App, Application, Bounds,
+    ClipboardItem, Context, Entity, FocusHandle, Hsla, KeyBinding, PathPromptOptions,
+    ScrollStrategy, ScrollWheelEvent, Subscription, UniformListScrollHandle, Window, WindowBounds,
+    WindowOptions,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
@@ -284,9 +286,18 @@ fn parse_timeout(text: &str, fallback: u64) -> u64 {
 #[derive(Clone, Copy, PartialEq)]
 enum ResTab {
     Body,
+    Tree,
     Headers,
     Tests,
     Code,
+}
+
+/// What the tree's copy buttons put on the clipboard (FR-RES-03).
+#[derive(Clone, Copy, PartialEq)]
+enum TreeCopy {
+    Value,
+    Path,
+    All,
 }
 
 /// What the scripts of the last send did, for the Tests view.
@@ -1045,6 +1056,139 @@ const VIEW_MAX_BYTES: u64 = 200 * 1024 * 1024;
 /// Most matches counted by Find (searching stops there).
 const FIND_MAX: usize = 10_000;
 
+/// A rendered piece of one viewer row: plain text, a Find match, or the current Find match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Span {
+    Plain,
+    Hit,
+    Current,
+}
+
+/// Split one row into spans so each Find match is highlighted inside the line, not just the
+/// whole row (FR-RES-05). `row_start` is the row's byte offset in the body, `hits` the sorted
+/// match offsets from `find_all`, and `hit_len` the needle's byte length. Tabs are expanded
+/// per span, so joining the spans gives exactly the text the row would otherwise show.
+fn row_spans(
+    raw: &[u8],
+    row_start: usize,
+    hits: &[usize],
+    hit_len: usize,
+    current: Option<usize>,
+) -> Vec<(String, Span)> {
+    let text = |b: &[u8]| String::from_utf8_lossy(b).replace('\t', "    ");
+    if hit_len == 0 || hits.is_empty() {
+        return vec![(text(raw), Span::Plain)];
+    }
+    let row_end = row_start + raw.len();
+    // hits are sorted, so skip everything that ends before this row starts
+    let from = hits.partition_point(|&h| h + hit_len <= row_start);
+    let mut out: Vec<(String, Span)> = Vec::new();
+    let mut at = 0usize;
+    for &h in &hits[from..] {
+        if h >= row_end {
+            break;
+        }
+        // clamp to this row: a match can straddle a wrapped row boundary
+        let end = (h + hit_len).saturating_sub(row_start).min(raw.len());
+        if end <= at {
+            continue;
+        }
+        let start = h.saturating_sub(row_start).min(raw.len()).max(at);
+        if start > at {
+            out.push((text(&raw[at..start]), Span::Plain));
+        }
+        let kind = if Some(h) == current {
+            Span::Current
+        } else {
+            Span::Hit
+        };
+        out.push((text(&raw[start..end]), kind));
+        at = end;
+    }
+    if at < raw.len() {
+        out.push((text(&raw[at..]), Span::Plain));
+    }
+    if out.is_empty() {
+        out.push((text(raw), Span::Plain));
+    }
+    out
+}
+
+/// Containers deeper than this start folded, per FR-RES-03.
+const TREE_DEFAULT_DEPTH: u16 = 2;
+
+/// Longest scalar drawn on one tree row. The whole value is still what "Copy value" copies.
+const TREE_VALUE_MAX: usize = 300;
+
+/// Largest body the tree view indexes. The index is built in one pass on the UI thread, so
+/// this stays well above the 10 MB the budget asks for (NFR-PERF-05) without risking a stall
+/// on a body the Body view can still show.
+const TREE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// One tab's JSON tree of the response (FR-RES-03).
+struct TreeView {
+    /// Shared so the render closure clones a pointer, not 150k nodes.
+    tree: Arc<JsonTree>,
+    collapsed: CollapseState,
+    /// The visible rows and whether each one is folded, cached so render never re-walks the
+    /// whole tree. Rebuilt only when the fold state changes.
+    rows: Arc<Vec<(u32, bool)>>,
+    selected: Option<u32>,
+}
+
+impl TreeView {
+    fn rebuild_rows(&mut self) {
+        let collapsed = &self.collapsed;
+        self.rows = Arc::new(
+            self.tree
+                .visible(collapsed)
+                .into_iter()
+                .map(|ix| (ix, collapsed.is_collapsed(ix)))
+                .collect(),
+        );
+    }
+}
+
+/// FR-RES-03 asks for a colour per JSON type. Fixed values, like the Find highlight, so a
+/// type reads the same in the light and the dark theme.
+fn kind_color(kind: Kind) -> Hsla {
+    match kind {
+        Kind::String => c(0xa6e3a1),
+        Kind::Number => c(0xfab387),
+        Kind::Bool => c(0xcba6f7),
+        Kind::Null | Kind::Object | Kind::Array => c(0x9399b2),
+    }
+}
+
+/// Shorten `s` to `max` characters, marking the cut with an ellipsis.
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('\u{2026}');
+    out
+}
+
+/// What one tree row shows next to its key: a folded summary for containers, the clipped
+/// literal for scalars (strings quoted, so they can't be read as numbers). A container must
+/// never go through `value_text`, which returns its whole subtree -- that is for "Copy value",
+/// one node at a time.
+fn tree_value_display(t: &JsonTree, src: &[u8], ix: u32) -> String {
+    let Some(node) = t.nodes().get(ix as usize) else {
+        return String::new();
+    };
+    if node.kind.is_container() {
+        return t.summary(ix);
+    }
+    let text = t.value_text(src, ix);
+    if node.kind == Kind::String {
+        format!("\"{}\"", clip(&text, TREE_VALUE_MAX))
+    } else {
+        clip(&text, TREE_VALUE_MAX)
+    }
+}
+
 /// Everything that belongs to one open request: its editor, where it is saved, and the last
 /// response. Tabs are independent, so a request can be in flight in one while you edit another.
 struct RequestTab {
@@ -1111,6 +1255,11 @@ struct RequestTab {
     /// Bumped per response, so a slow background load never replaces a newer response.
     view_gen: u64,
     list_scroll: UniformListScrollHandle,
+    /// The response as a JSON tree (FR-RES-03). `None` until the Tree view is first opened;
+    /// `Err` holds why this body has no tree. `tree_gen` says which response it belongs to.
+    tree: Option<Result<TreeView, String>>,
+    tree_gen: u64,
+    tree_scroll: UniformListScrollHandle,
     find: Entity<InputState>,
     find_open: bool,
     /// Byte offsets of matches in the viewer's data.
@@ -1265,6 +1414,9 @@ impl RequestTab {
             loading_file: None,
             view_gen: 0,
             list_scroll: UniformListScrollHandle::new(),
+            tree: None,
+            tree_gen: 0,
+            tree_scroll: UniformListScrollHandle::new(),
             find,
             find_open: false,
             matches: Vec::new(),
@@ -2626,6 +2778,127 @@ impl Workspace {
             )
     }
 
+    /// The Tree view: fold controls, the three copy buttons, and a virtualized tree of the
+    /// response (FR-RES-03).
+    fn render_tree(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (muted, accent) = (theme.muted_foreground, theme.accent);
+        let tab = self.tab();
+        let (tv, data) = match (tab.tree.as_ref(), tab.view.as_ref()) {
+            (Some(Ok(tv)), Some(v)) => (tv, v.data.clone()),
+            (Some(Err(e)), _) => {
+                return div()
+                    .p_4()
+                    .text_color(muted)
+                    .child(e.clone())
+                    .into_any_element()
+            }
+            _ => {
+                return div()
+                    .p_4()
+                    .text_color(muted)
+                    .child("Send a request to see the response")
+                    .into_any_element()
+            }
+        };
+
+        let bar =
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .p_2()
+                .child(
+                    Button::new("tree-expand")
+                        .label("Expand all")
+                        .on_click(cx.listener(|this, _ev, _window, cx| this.tree_fold(true, cx))),
+                )
+                .child(
+                    Button::new("tree-collapse")
+                        .label("Collapse all")
+                        .on_click(cx.listener(|this, _ev, _window, cx| this.tree_fold(false, cx))),
+                )
+                .child(div().flex_1())
+                .child(Button::new("tree-copy-value").label("Copy value").on_click(
+                    cx.listener(|this, _ev, _window, cx| this.tree_copy(TreeCopy::Value, cx)),
+                ))
+                .child(Button::new("tree-copy-path").label("Copy path").on_click(
+                    cx.listener(|this, _ev, _window, cx| this.tree_copy(TreeCopy::Path, cx)),
+                ))
+                .child(Button::new("tree-copy-all").label("Copy all").on_click(
+                    cx.listener(|this, _ev, _window, cx| this.tree_copy(TreeCopy::All, cx)),
+                ));
+
+        let handle = cx.entity();
+        let rows = tv.rows.clone();
+        let tree = tv.tree.clone();
+        let selected = tv.selected;
+        let key_col = c(0x89b4fa);
+        let list =
+            uniform_list("json-tree", rows.len(), move |range, _window, _cx| {
+                let mut items = Vec::new();
+                for i in range {
+                    let Some(&(ix, folded)) = rows.get(i) else {
+                        items.push(div().h(px(18.)).into_any_element());
+                        continue;
+                    };
+                    let Some(node) = tree.nodes().get(ix as usize) else {
+                        items.push(div().h(px(18.)).into_any_element());
+                        continue;
+                    };
+                    let marker = if !node.kind.is_container() {
+                        " "
+                    } else if folded {
+                        "\u{25b8}"
+                    } else {
+                        "\u{25be}"
+                    };
+                    let key = tree.key_text(&data[..], ix);
+                    let value = tree_value_display(&tree, &data[..], ix);
+                    let handle = handle.clone();
+                    items.push(
+                        div()
+                            .id(("tree-row", i))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .h(px(18.))
+                            .gap_1()
+                            .pr_2()
+                            .pl(px(8.0 + f32::from(node.depth.min(40)) * 14.0))
+                            .when(selected == Some(ix), |d| d.bg(accent))
+                            .on_click(move |_ev, _window, cx| {
+                                handle.update(cx, |this, cx| this.on_tree_row(ix, cx));
+                            })
+                            .child(div().w(px(12.)).flex_none().text_color(muted).child(marker))
+                            .children(key.map(|k| {
+                                div().flex_none().text_color(key_col).child(format!("{k}:"))
+                            }))
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_color(kind_color(node.kind))
+                                    .child(value),
+                            )
+                            .into_any_element(),
+                    );
+                }
+                items
+            })
+            .track_scroll(tab.tree_scroll.clone())
+            .h_full();
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(bar)
+            .child(div().flex_1().overflow_hidden().child(list))
+            .into_any_element()
+    }
+
     /// The Code view: language picker, values-or-placeholders toggle, Copy, and the snippet.
     fn render_code(&self, cx: &Context<Self>) -> impl IntoElement {
         let mut bar = div()
@@ -3681,6 +3954,100 @@ impl Workspace {
         .detach();
     }
 
+    // ---------------- JSON tree (FR-RES-03) ----------------
+
+    /// Index the shown body as JSON the first time the Tree view needs it, once per response.
+    /// Called from `render`, so a new response in an open Tree view reindexes by itself.
+    fn ensure_tree(&mut self) {
+        let tab = self.tab_mut();
+        if tab.res_tab != ResTab::Tree || (tab.tree.is_some() && tab.tree_gen == tab.view_gen) {
+            return;
+        }
+        tab.tree_gen = tab.view_gen;
+        tab.tree = Some(match tab.view.as_ref() {
+            None => Err("Send a request to see the response".to_string()),
+            Some(v) if v.data.len() > TREE_MAX_BYTES => Err(format!(
+                "This response is {}, too big for the tree view. The Body view still shows it.",
+                human(v.data.len() as u64)
+            )),
+            Some(v) => match JsonTree::parse(&v.data[..]) {
+                Ok(t) => {
+                    let mut tv = TreeView {
+                        collapsed: CollapseState::with_default_depth(&t, TREE_DEFAULT_DEPTH),
+                        tree: Arc::new(t),
+                        rows: Arc::new(Vec::new()),
+                        selected: None,
+                    };
+                    tv.rebuild_rows();
+                    Ok(tv)
+                }
+                Err(e) => Err(format!("This response can't be shown as a JSON tree: {e}")),
+            },
+        });
+    }
+
+    /// Clicking a row selects it; clicking a container also folds or unfolds it.
+    fn on_tree_row(&mut self, ix: u32, cx: &mut Context<Self>) {
+        if let Some(Ok(tv)) = self.tab_mut().tree.as_mut() {
+            tv.selected = Some(ix);
+            let container = tv
+                .tree
+                .nodes()
+                .get(ix as usize)
+                .map(|n| n.kind.is_container())
+                .unwrap_or(false);
+            if container {
+                tv.collapsed.toggle(ix);
+                tv.rebuild_rows();
+            }
+        }
+        cx.notify();
+    }
+
+    fn tree_fold(&mut self, expand: bool, cx: &mut Context<Self>) {
+        if let Some(Ok(tv)) = self.tab_mut().tree.as_mut() {
+            if expand {
+                tv.collapsed.expand_all();
+            } else {
+                tv.collapsed.collapse_all(&tv.tree);
+            }
+            tv.rebuild_rows();
+        }
+        cx.notify();
+    }
+
+    /// Copy value, copy JSON path, or copy the whole document (FR-RES-03).
+    fn tree_copy(&mut self, what: TreeCopy, cx: &mut Context<Self>) {
+        let picked = {
+            let tab = self.tab();
+            match (tab.tree.as_ref(), tab.view.as_ref()) {
+                (Some(Ok(tv)), Some(v)) => {
+                    let src = &v.data[..];
+                    match what {
+                        TreeCopy::All => Ok((tv.tree.value_text(src, 0), "Copied the whole JSON.")),
+                        TreeCopy::Value => match tv.selected {
+                            Some(ix) => Ok((tv.tree.value_text(src, ix), "Copied the value.")),
+                            None => Err("Click a row in the tree first."),
+                        },
+                        TreeCopy::Path => match tv.selected {
+                            Some(ix) => Ok((tv.tree.path(src, ix), "Copied the JSON path.")),
+                            None => Err("Click a row in the tree first."),
+                        },
+                    }
+                }
+                _ => Err("There is no JSON tree to copy from."),
+            }
+        };
+        match picked {
+            Ok((text, msg)) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                self.tab_mut().status = Status::Info(msg.to_string());
+            }
+            Err(msg) => self.tab_mut().status = Status::Error(msg.to_string()),
+        }
+        cx.notify();
+    }
+
     fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let tab = self.tab_mut();
         tab.find_open = true;
@@ -4729,6 +5096,7 @@ impl Render for Workspace {
             window.focus(&self.focus);
             self.focused_once = true;
         }
+        self.ensure_tree();
         // ---- viewer geometry (depends on the current window width) ----
         let avail = avail_width(window);
         let cols = (((avail / char_w()).floor() as usize).saturating_sub(1)).max(10);
@@ -5059,6 +5427,13 @@ impl Render for Workspace {
                             })),
                     )
                     .child(
+                        seg_btn("r-tree", "Tree".to_string(), tab.res_tab == ResTab::Tree)
+                            .on_click(cx.listener(|this, _ev, _window, cx| {
+                                this.tab_mut().res_tab = ResTab::Tree;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                         seg_btn(
                             "r-headers",
                             format!("Headers ({})", tab.resp_headers.len()),
@@ -5120,15 +5495,32 @@ impl Render for Workspace {
                 } else {
                     None
                 };
+                // Every match on screen is highlighted inside its line (FR-RES-05).
+                let (hits, hit_len, cur_hit) = if tab.find_open {
+                    (
+                        tab.matches.clone(),
+                        tab.find.read(cx).value().len(),
+                        tab.matches.get(tab.match_ix).copied(),
+                    )
+                } else {
+                    (Vec::new(), 0, None)
+                };
                 uniform_list("response", n, move |range, _window, _cx| {
                     let mut items = Vec::new();
                     for ix in range {
-                        let mut text = String::from_utf8_lossy(rows.row(&data, ix))
-                            .trim_end()
-                            .to_string();
-                        if text.contains('\t') {
-                            text = text.replace('\t', "    ");
+                        // trailing whitespace is not drawn, so spans stop at `keep`
+                        let full = rows.row(&data, ix);
+                        let mut keep = full.len();
+                        while keep > 0 && full[keep - 1].is_ascii_whitespace() {
+                            keep -= 1;
                         }
+                        let spans = row_spans(
+                            &full[..keep],
+                            rows.starts[ix] as usize,
+                            &hits,
+                            hit_len,
+                            cur_hit,
+                        );
                         // Continuation rows of a wrapped line get an empty gutter, so numbers
                         // stay attached to the first row of their line.
                         let label = if rows.lines[ix] & CONT != 0 {
@@ -5159,8 +5551,23 @@ impl Render for Workspace {
                                             .relative()
                                             .left(px(-scroll_x))
                                             .flex_none()
+                                            .flex()
+                                            .flex_row()
                                             .whitespace_nowrap()
-                                            .child(text),
+                                            .children(spans.into_iter().map(|(s, kind)| {
+                                                let d = div().whitespace_nowrap().child(s);
+                                                // fixed colours, so a match stays readable in
+                                                // both the light and the dark theme
+                                                match kind {
+                                                    Span::Current => {
+                                                        d.bg(c(0xfab387)).text_color(c(0x11111b))
+                                                    }
+                                                    Span::Hit => {
+                                                        d.bg(c(0xf9e2af)).text_color(c(0x11111b))
+                                                    }
+                                                    Span::Plain => d,
+                                                }
+                                            })),
                                     ),
                                 ),
                         );
@@ -5209,7 +5616,13 @@ impl Render for Workspace {
                     ))
                     .child(Button::new("find-close").label("✕").on_click(cx.listener(
                         |this, _ev, window, cx| {
-                            this.tab_mut().find_open = false;
+                            // closing is also "clear" (FR-RES-05): no stale query or matches
+                            let find = this.tab().find.clone();
+                            find.update(cx, |s, cx| s.set_value(String::new(), window, cx));
+                            let tab = this.tab_mut();
+                            tab.find_open = false;
+                            tab.matches.clear();
+                            tab.match_ix = 0;
                             this.refocus(window);
                             cx.notify();
                         },
@@ -5247,6 +5660,7 @@ impl Render for Workspace {
                         .child(div().flex_1().child(v.clone()))
                 }))
                 .into_any_element(),
+            ResTab::Tree => self.render_tree(cx),
             ResTab::Tests => self.render_tests(tab, cx).into_any_element(),
             ResTab::Code => self.render_code(cx).into_any_element(),
         };
@@ -5589,6 +6003,142 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tree_rows_show_summaries_scalars_and_clipped_strings() {
+        let src = br#"{"n":1,"s":"x","b":true,"z":null,"arr":[1,2]}"#;
+        let t = JsonTree::parse(src).expect("parses");
+
+        // document order: 0 root, then one node per member
+        assert_eq!(tree_value_display(&t, src, 1), "1");
+        assert_eq!(
+            tree_value_display(&t, src, 2),
+            "\"x\"",
+            "strings are quoted"
+        );
+        assert_eq!(tree_value_display(&t, src, 3), "true");
+        assert_eq!(tree_value_display(&t, src, 4), "null");
+
+        // a container shows its summary, never its whole subtree
+        let root = tree_value_display(&t, src, 0);
+        assert_eq!(root, t.summary(0));
+        assert!(root.contains('5'), "summary counts the fields: {root}");
+        let arr = t
+            .nodes()
+            .iter()
+            .position(|n| n.kind == Kind::Array)
+            .expect("the array");
+        let arr_row = tree_value_display(&t, src, arr as u32);
+        assert_eq!(arr_row, t.summary(arr as u32));
+        assert_eq!(arr_row, "[2 items]");
+        assert_ne!(arr_row, "[1,2]", "a summary, not the raw span");
+        // out of range is empty, never a panic
+        assert_eq!(tree_value_display(&t, src, 9_999), "");
+
+        // long strings are clipped for the row; Copy value still has all of it
+        let long = format!("{{\"k\":\"{}\"}}", "x".repeat(TREE_VALUE_MAX + 50));
+        let lt = JsonTree::parse(long.as_bytes()).expect("parses");
+        let shown = tree_value_display(&lt, long.as_bytes(), 1);
+        // the ellipsis sits inside the closing quote
+        assert!(shown.starts_with('"'), "quoted: {}", &shown[..4]);
+        assert!(
+            shown.ends_with("\u{2026}\""),
+            "clipped inside the quotes: {}",
+            &shown[shown.len() - 6..]
+        );
+        assert_eq!(
+            shown.chars().count(),
+            TREE_VALUE_MAX + 3,
+            "two quotes and the ellipsis"
+        );
+        assert_eq!(
+            lt.value_text(long.as_bytes(), 1).chars().count(),
+            TREE_VALUE_MAX + 50
+        );
+    }
+
+    #[test]
+    fn clip_counts_characters_not_bytes() {
+        assert_eq!(clip("abc", 5), "abc");
+        assert_eq!(clip("abc", 3), "abc");
+        assert_eq!(clip("abcd", 3), "abc\u{2026}");
+        // a multi-byte character is never cut in half
+        assert_eq!(clip("h\u{e9}llo", 2), "h\u{e9}\u{2026}");
+        assert_eq!(clip("", 0), "");
+    }
+
+    #[test]
+    fn find_spans_highlight_each_match_in_the_row() {
+        let row = b"id: hello, hello world";
+        assert_eq!(
+            row_spans(row, 0, &[], 0, None),
+            vec![("id: hello, hello world".to_string(), Span::Plain)],
+            "no query: one plain span"
+        );
+
+        // two matches in one row; the second one is the current match
+        let got = row_spans(row, 0, &[4usize, 11], 5, Some(11));
+        assert_eq!(
+            got,
+            vec![
+                ("id: ".to_string(), Span::Plain),
+                ("hello".to_string(), Span::Hit),
+                (", ".to_string(), Span::Plain),
+                ("hello".to_string(), Span::Current),
+                (" world".to_string(), Span::Plain),
+            ]
+        );
+        // joining the spans always reproduces the row
+        let joined: String = got.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(joined, String::from_utf8_lossy(row));
+
+        // a row further down the body: offsets are relative to row_start
+        assert_eq!(
+            row_spans(b"hello", 100, &[100], 5, Some(100)),
+            vec![("hello".to_string(), Span::Current)]
+        );
+        // matches belonging to other rows are ignored
+        assert_eq!(
+            row_spans(b"hello", 100, &[0, 50, 200], 5, None),
+            vec![("hello".to_string(), Span::Plain)]
+        );
+        // a match straddling a wrapped row boundary is clamped to the visible part
+        assert_eq!(
+            row_spans(b"abcde", 0, &[3], 5, None),
+            vec![
+                ("abc".to_string(), Span::Plain),
+                ("de".to_string(), Span::Hit),
+            ]
+        );
+        // the same match seen from the next row: bytes 3..8 cover all of "fgh" at 5..8
+        assert_eq!(
+            row_spans(b"fgh", 5, &[3], 5, None),
+            vec![("fgh".to_string(), Span::Hit)]
+        );
+        // a match that ends inside the row leaves the rest plain
+        assert_eq!(
+            row_spans(b"fgh", 5, &[3], 4, None),
+            vec![
+                ("fg".to_string(), Span::Hit),
+                ("h".to_string(), Span::Plain),
+            ]
+        );
+        // tabs are expanded inside each span, so columns still line up
+        assert_eq!(
+            row_spans(b"a\thi", 0, &[2], 2, None),
+            vec![
+                ("a    ".to_string(), Span::Plain),
+                ("hi".to_string(), Span::Hit),
+            ]
+        );
+        // multi-byte text is not split mid-character
+        let uni = "caf\u{e9} caf\u{e9}".as_bytes();
+        let got = row_spans(uni, 0, &[6], 5, None);
+        assert_eq!(
+            got.last().map(|(s, k)| (s.as_str(), *k)),
+            Some(("caf\u{e9}", Span::Hit))
+        );
+    }
 
     #[test]
     fn tab_titles() {
