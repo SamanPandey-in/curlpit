@@ -12,7 +12,7 @@ use at_script::{ScriptInput, ScriptOutput, ScriptRequest, ScriptResponse, VarMap
 pub(crate) struct ScriptReport {
     pub(crate) pre: Option<ScriptOutput>,
     pub(crate) test: Option<ScriptOutput>,
-    /// e.g. "pm.environment changes were ignored: no environment is active"
+    /// e.g. "pm.environment changes were not kept: no environment is active"
     pub(crate) notes: Vec<String>,
 }
 

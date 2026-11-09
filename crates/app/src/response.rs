@@ -70,6 +70,18 @@ impl ViewData {
 /// 50 MB); bigger ones can still be saved with "Save…".
 pub(crate) const VIEW_MAX_BYTES: u64 = 200 * 1024 * 1024;
 
+/// Whether Find has to search again: a different shown body, or a different query.
+///
+/// Keyed on the tab's view epoch, never on the body's address. Comparing
+/// `Arc::as_ptr(&view.data)` looks equivalent and is not: when a response replaces the
+/// previous one the old buffer is freed, the allocator may hand the same address back, and
+/// an unchanged query would then keep the *previous* body's byte offsets. Those offsets go
+/// straight into `RowIndex::row_of` and `row_spans`, so Find would highlight the wrong
+/// bytes and scroll to the wrong row. An epoch only ever increases, so it cannot collide.
+pub(crate) fn find_cache_stale(key: &(u64, String), view_epoch: u64, query: &str) -> bool {
+    key.0 != view_epoch || key.1 != query
+}
+
 /// Most matches counted by Find (searching stops there).
 pub(crate) const FIND_MAX: usize = 10_000;
 
@@ -134,6 +146,26 @@ pub(crate) fn row_spans(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_cache_is_keyed_on_the_view_epoch() {
+        let key = (7u64, "needle".to_string());
+        assert!(
+            !find_cache_stale(&key, 7, "needle"),
+            "same body and query: no research"
+        );
+        assert!(
+            find_cache_stale(&key, 8, "needle"),
+            "a new body with the same query must research -- this is the case a pointer \
+             comparison could miss, because a freed buffer can be reallocated at the same \
+             address and would leave the previous body's offsets in place"
+        );
+        assert!(find_cache_stale(&key, 7, "other"), "a new query");
+        assert!(find_cache_stale(&key, 7, ""), "the query was cleared");
+        // a fresh tab starts at epoch 0 with no query, and the first body makes it 1
+        assert!(!find_cache_stale(&(0, String::new()), 0, ""));
+        assert!(find_cache_stale(&(0, String::new()), 1, ""));
+    }
 
     #[test]
     fn find_spans_highlight_each_match_in_the_row() {

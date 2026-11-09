@@ -6,7 +6,9 @@ use crate::editor::{
     collect, collect_form, AuthKind, BodyMode, FormRow, KvRow, RawKind, ReqTab, Which,
 };
 use crate::format::{human, parse_timeout, tab_title};
-use crate::response::{content_type, display_body, ResTab, ViewData, FIND_MAX, VIEW_MAX_BYTES};
+use crate::response::{
+    content_type, display_body, find_cache_stale, ResTab, ViewData, FIND_MAX, VIEW_MAX_BYTES,
+};
 use crate::script::ScriptReport;
 use crate::tree::TreeView;
 use crate::ui::{char_w, Status};
@@ -18,7 +20,6 @@ use gpui::prelude::*;
 use gpui::{App, Context, Entity, ScrollStrategy, Subscription, UniformListScrollHandle, Window};
 use gpui_component::input::{InputEvent, InputState};
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// A closed tab, kept so it can be reopened with its edits.
@@ -94,6 +95,12 @@ pub(crate) struct RequestTab {
     pub(crate) loading_file: Option<PathBuf>,
     /// Bumped per response, so a slow background load never replaces a newer response.
     pub(crate) view_gen: u64,
+    /// Bumped every time `view` is replaced -- which happens more often than `view_gen`
+    /// changes, because a spilled body first shows a "Loading..." placeholder and is then
+    /// swapped for the real bytes inside the same response. Caches derived from the shown
+    /// body (Find matches, the JSON tree) key on this, never on `view_gen` or on the
+    /// buffer's address.
+    pub(crate) view_epoch: u64,
     pub(crate) list_scroll: UniformListScrollHandle,
     /// The response as a JSON tree (FR-RES-03). `None` until the Tree view is first opened;
     /// `Err` holds why this body has no tree. `tree_gen` says which response it belongs to.
@@ -105,8 +112,8 @@ pub(crate) struct RequestTab {
     /// Byte offsets of matches in the viewer's data.
     pub(crate) matches: Vec<usize>,
     pub(crate) match_ix: usize,
-    /// (data pointer, query) the matches belong to.
-    pub(crate) matches_key: (usize, String),
+    /// (view epoch, query) the matches belong to.
+    pub(crate) matches_key: (u64, String),
     pub(crate) scroll_to_match: bool,
     pub(crate) _sub: Subscription,
     pub(crate) _find_sub: Subscription,
@@ -253,6 +260,7 @@ impl RequestTab {
             body_file: None,
             loading_file: None,
             view_gen: 0,
+            view_epoch: 0,
             list_scroll: UniformListScrollHandle::new(),
             tree: None,
             tree_gen: 0,
@@ -520,19 +528,16 @@ impl RequestTab {
 
     pub(crate) fn set_view_data(&mut self, v: ViewData) {
         self.view = Some(v);
+        // the one place `view` is replaced, so the one place the epoch has to move
+        self.view_epoch += 1;
         self.scroll_x = 0.0;
         self.list_scroll.scroll_to_item(0, ScrollStrategy::Top);
     }
 
-    /// Recompute Find matches when the query or the body changed.
+    /// Recompute Find matches when the query or the shown body changed.
     pub(crate) fn refresh_matches(&mut self, cx: &App) {
         let query = self.find.read(cx).value().to_string();
-        let ptr = self
-            .view
-            .as_ref()
-            .map(|v| Arc::as_ptr(&v.data) as usize)
-            .unwrap_or(0);
-        if self.matches_key.0 == ptr && self.matches_key.1 == query {
+        if !find_cache_stale(&self.matches_key, self.view_epoch, &query) {
             return;
         }
         self.matches = match &self.view {
@@ -541,7 +546,7 @@ impl RequestTab {
         };
         self.match_ix = 0;
         self.scroll_to_match = !self.matches.is_empty();
-        self.matches_key = (ptr, query);
+        self.matches_key = (self.view_epoch, query);
     }
 
     /// Bring the current match into view: scroll the list to its row and, without wrap, the

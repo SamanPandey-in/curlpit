@@ -15,10 +15,13 @@ impl Workspace {
     /// Called from `render`, so a new response in an open Tree view reindexes by itself.
     pub(crate) fn ensure_tree(&mut self) {
         let tab = self.tab_mut();
-        if tab.res_tab != ResTab::Tree || (tab.tree.is_some() && tab.tree_gen == tab.view_gen) {
+        // The epoch, not `view_gen`: a spilled body is shown as a "Loading..." placeholder
+        // first and swapped for the real bytes inside the same response, and the tree has to
+        // be rebuilt when that happens or it would keep the placeholder's parse error.
+        if tab.res_tab != ResTab::Tree || (tab.tree.is_some() && tab.tree_gen == tab.view_epoch) {
             return;
         }
-        tab.tree_gen = tab.view_gen;
+        tab.tree_gen = tab.view_epoch;
         tab.tree = Some(match tab.view.as_ref() {
             None => Err("Send a request to see the response".to_string()),
             Some(v) if v.data.len() > TREE_MAX_BYTES => Err(format!(

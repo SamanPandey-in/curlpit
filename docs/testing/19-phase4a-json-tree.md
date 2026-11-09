@@ -49,6 +49,12 @@ API_TESTER_DATA_DIR=/tmp/at-test13 cargo run --release -p at-app
 | Q20 | Press `✕` on the Find bar, then **Find** again | the box is empty, no stale highlights or count |
 | Q21 | Find a string that occurs inside a long wrapped line (turn wrap on) | the highlight lands on the right part of the right row, split across rows if it straddles one |
 | Q22 | Find with a tab character nearby (e.g. a raw body with tabs) | highlight stays aligned with the text (tabs are expanded per span) |
-| Q23 | Regression: J2/J7 (doc 18), K2 (doc 17), S1 (doc 16) | same as before |
+| Q23 | A **spilled** body: fetch JSON over 10 MB and open **Tree** while it still says "Loading the … response body…" | the placeholder first reports it can't be shown as a tree, then the tree **appears by itself** once the body finishes loading (it used to stay stuck on that error) |
+| Q24 | With Find open and a query that matches, send the same request again and get a response of the same size but different content | the highlights move to the new body's matches; nothing stays highlighted at a stale position |
+| Q25 | Regression: J2/J7 (doc 18), K2 (doc 17), S1 (doc 16) | same as before |
 
 Report pass/fail per row; for Q7/Q9/Q13 paste what you got, and for Q14 the peak RSS.
+
+Q23 and Q24 cover the two stale-cache bugs fixed in D40. Neither was visible before this
+phase — the tree and the in-line highlighting are the first things to read those cached
+offsets — so they are worth running even though they look like edge cases.
