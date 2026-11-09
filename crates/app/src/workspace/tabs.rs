@@ -42,10 +42,14 @@ impl Workspace {
         }
         if self.tabs[ix].is_dirty(cx) && !self.tabs[ix].confirm_close {
             self.tabs[ix].confirm_close = true;
-            self.tabs[ix].status = Status::Info(
-                "Unsaved changes: Save first, or click the tab's Discard? to close it anyway"
-                    .into(),
-            );
+            // Only the active tab's status row is drawn, so writing the warning onto the tab
+            // being closed would hide it exactly when its ✕ silently turned into "Discard?".
+            // `notice` puts it where the user is looking instead, and the tab is named
+            // because that may not be the tab they are reading.
+            let title = self.tabs[ix].title(cx);
+            self.notice(Status::Info(format!(
+                "{title} has unsaved changes: Save first, or click its Discard? to close it anyway"
+            )));
             cx.notify();
             return;
         }

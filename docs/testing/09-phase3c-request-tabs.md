@@ -56,6 +56,7 @@ Use a fresh data dir (`/tmp/at-test3`) so earlier test files don't interfere. Cr
 | T28 | Name a request with ~40 characters | tab title is cut to 24 characters ending with `…` |
 | T29 | Open ~15 tabs | tab bar scrolls sideways (trackpad / Shift+wheel); app stays responsive |
 | T30 | Memory with 5 tabs open, each with a small response | still close to ~70 MB idle |
+| T32 | Type in tab A, switch to tab B, then click A's ✕ from B | A's ✕ becomes **Discard?** *and* a message naming A appears in the status row you are looking at (it used to change silently) |
 | T31 | Regression: rerun E4, E7, E10, E20 from doc 08 and S7, S11 from doc 07 | same results as before |
 
 Report pass/fail per row. For anything that fails, a screenshot plus what you clicked helps most.
