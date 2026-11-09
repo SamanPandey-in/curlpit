@@ -164,6 +164,7 @@ async fn large_body_spills_to_disk() {
     let cfg = EngineConfig {
         spill_threshold: 100,
         spill_dir: dir.clone(),
+        cookies: None,
     };
     let resp = send(
         &built,
@@ -182,4 +183,97 @@ async fn large_body_spills_to_disk() {
         other => panic!("expected spill, got {other:?}"),
     }
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Server that answers with a full raw response built from the request head.
+async fn serve_raw<F>(f: F) -> SocketAddr
+where
+    F: Fn(String) -> String + Send + Sync + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let f = Arc::new(f);
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let f = f.clone();
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let resp = f(String::from_utf8_lossy(&buf).to_string());
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn cookie_jar_keeps_and_sends_cookies() {
+    use at_http::CookieJar;
+    // /login sets a cookie; every response echoes the Cookie header it received
+    let addr = serve_raw(|head| {
+        let cookie = head
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("cookie:"))
+            .map(|l| l[7..].trim().to_string())
+            .unwrap_or_default();
+        let set = if head.starts_with("GET /login") {
+            "Set-Cookie: sid=abc; Path=/\r\n"
+        } else {
+            ""
+        };
+        format!(
+            "HTTP/1.1 200 OK\r\n{set}Content-Length: {}\r\nConnection: close\r\n\r\n{cookie}",
+            cookie.len()
+        )
+    })
+    .await;
+    let jar = Arc::new(CookieJar::new());
+    let cfg = EngineConfig {
+        cookies: Some(jar.clone()),
+        ..Default::default()
+    };
+    let go = |path: &str, header: Option<&str>| {
+        let mut r = req(format!("http://{addr}{path}"));
+        if let Some(h) = header {
+            r.headers.push(KeyValue::new("Cookie", h));
+        }
+        build(&r, &Variables::default()).unwrap()
+    };
+    let body = |resp: at_http::HttpResponse| match resp.body {
+        ResponseBody::Memory(b) => String::from_utf8_lossy(&b).to_string(),
+        _ => panic!("expected memory body"),
+    };
+    let s = RequestSettings::default();
+    let t = CancellationToken::new();
+
+    let first = send(&go("/login", None), &s, &cfg, &t).await.unwrap();
+    assert_eq!(body(first), "", "no cookie before login");
+    assert!(jar.take_changed());
+    assert_eq!(jar.list().len(), 1);
+
+    let second = send(&go("/me", None), &s, &cfg, &t).await.unwrap();
+    assert_eq!(body(second), "sid=abc", "jar cookie sent back");
+
+    let manual = send(&go("/me", Some("mine=1")), &s, &cfg, &t)
+        .await
+        .unwrap();
+    assert_eq!(
+        body(manual),
+        "mine=1",
+        "a Cookie header you set wins; the jar adds nothing"
+    );
+
+    // without a jar, nothing is remembered
+    let none = send(&go("/me", None), &s, &EngineConfig::default(), &t)
+        .await
+        .unwrap();
+    assert_eq!(body(none), "");
 }

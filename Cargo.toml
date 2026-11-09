@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/http", "crates/demo", "crates/app"]
+members = ["crates/core", "crates/http", "crates/demo", "crates/store", "crates/history", "crates/interop", "crates/codegen", "crates/script", "crates/app"]
 # CI and plain `cargo test` skip the GUI crate (slow to build); build it with `-p at-app`.
-default-members = ["crates/core", "crates/http", "crates/demo"]
+default-members = ["crates/core", "crates/http", "crates/demo", "crates/store", "crates/history", "crates/interop", "crates/codegen", "crates/script"]
 
 [workspace.package]
 version = "0.0.1"
@@ -17,7 +17,7 @@ thiserror = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", "io-util", "net"] }
 tokio-util = "0.7"
 bytes = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "gzip", "brotli", "zstd", "http2"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "gzip", "brotli", "zstd", "http2", "cookies"] }
 
 # Size AND speed: fat LTO + 1 codegen unit + abort-on-panic + stripped symbols.
 [profile.release]

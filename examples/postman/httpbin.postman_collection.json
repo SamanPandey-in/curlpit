@@ -1,0 +1,102 @@
+{
+  "info": {
+    "name": "httpbin sample",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+  },
+  "variable": [{ "key": "unused", "value": "x" }],
+  "event": [
+    { "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["console.log('hi')"] } }
+  ],
+  "item": [
+    {
+      "name": "Basics",
+      "item": [
+        {
+          "name": "Get with query",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "X-Disabled", "value": "1", "disabled": true }
+            ],
+            "url": {
+              "raw": "{{base}}/get?limit=10&tag=dog",
+              "host": ["{{base}}"],
+              "path": ["get"],
+              "query": [
+                { "key": "limit", "value": "10" },
+                { "key": "tag", "value": "dog", "disabled": true }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Post JSON",
+          "request": {
+            "method": "POST",
+            "auth": { "type": "noauth" },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"rex\",\n  \"age\": 3\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{base}}/post"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Basic auth",
+          "request": {
+            "method": "GET",
+            "auth": {
+              "type": "basic",
+              "basic": [
+                { "key": "username", "value": "user", "type": "string" },
+                { "key": "password", "value": "passwd", "type": "string" }
+              ]
+            },
+            "url": "{{base}}/basic-auth/user/passwd"
+          }
+        },
+        {
+          "name": "Bearer (inherited)",
+          "request": { "method": "GET", "url": "{{base}}/bearer" }
+        },
+        {
+          "name": "OAuth2 (unsupported)",
+          "request": { "method": "GET", "auth": { "type": "oauth2", "oauth2": [] }, "url": "{{base}}/get" }
+        }
+      ]
+    },
+    {
+      "name": "Form urlencoded",
+      "request": {
+        "method": "POST",
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            { "key": "a", "value": "1" },
+            { "key": "b", "value": "2", "disabled": true }
+          ]
+        },
+        "url": "{{base}}/post"
+      }
+    },
+    {
+      "name": "Path variable",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "{{base}}/anything/:id", "variable": [{ "key": "id", "value": "7" }] }
+      }
+    }
+  ]
+}

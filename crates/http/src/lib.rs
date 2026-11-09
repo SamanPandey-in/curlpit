@@ -2,12 +2,16 @@
 //! structured errors, streaming with disk spill for large bodies (FR-ENG-*).
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use at_core::{Built, BuiltBody, BuiltPart, RequestSettings};
 use bytes::Bytes;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
+
+pub mod cookies;
+pub use cookies::{CookieInfo, CookieJar};
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
@@ -58,6 +62,9 @@ pub struct EngineConfig {
     /// Bodies larger than this are written to `spill_dir` (proposed 10 MB).
     pub spill_threshold: u64,
     pub spill_dir: PathBuf,
+    /// Cookies set by responses are kept here and sent back with matching requests
+    /// (including across redirects). `None` = no cookie handling.
+    pub cookies: Option<Arc<CookieJar>>,
 }
 
 impl Default for EngineConfig {
@@ -65,6 +72,7 @@ impl Default for EngineConfig {
         Self {
             spill_threshold: 10 * 1024 * 1024,
             spill_dir: std::env::temp_dir().join("api-tester-spill"),
+            cookies: None,
         }
     }
 }
@@ -103,6 +111,10 @@ async fn run(
         });
     if settings.timeout_ms > 0 {
         cb = cb.timeout(Duration::from_millis(settings.timeout_ms));
+    }
+    if let Some(jar) = &cfg.cookies {
+        // a Cookie header set on the request itself is left alone; the jar adds nothing then
+        cb = cb.cookie_provider(jar.clone());
     }
     let client = cb.build().map_err(|e| HttpError::Other(e.to_string()))?;
 

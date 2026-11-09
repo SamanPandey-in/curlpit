@@ -165,6 +165,13 @@ pub struct Request {
     #[serde(default)]
     pub method: Method,
     pub url: String,
+    /// JavaScript run before sending (FR-SCR). Plain values stay above the tables below so the
+    /// TOML file reads top to bottom.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pre_request_script: String,
+    /// JavaScript run after the response arrives (`pm.test(...)`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub test_script: String,
     #[serde(default)]
     pub params: Vec<KeyValue>,
     #[serde(default)]
