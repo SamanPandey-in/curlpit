@@ -1,0 +1,9 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+curl -X POST 'https://up.test/batch' \
+  -F 'tag=one' \
+  -F 'tag=two' \
+  -F 'files[]=@/tmp/a.png' \
+  -F 'files[]=@/tmp/b.png'

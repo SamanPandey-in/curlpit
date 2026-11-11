@@ -1,0 +1,20 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+import { openAsBlob } from "node:fs";
+
+const form: FormData = new FormData();
+form.append("note", "it's \"fine\" $here");
+form.append("upload", await openAsBlob("/tmp/a b's \"file\".png"), "a b's \"file\".png");
+
+const url = "https://up.test/u";
+
+const options: RequestInit = {
+  method: "PUT",
+  body: form,
+};
+
+const res: Response = await fetch(url, options);
+console.log(res.status);
+console.log(await res.text());

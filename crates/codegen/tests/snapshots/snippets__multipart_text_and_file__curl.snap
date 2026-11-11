@@ -1,0 +1,7 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+curl -X PUT 'https://up.test/u' \
+  -F 'note=it'\''s "fine" $here' \
+  -F 'upload=@/tmp/a b'\''s "file".png'

@@ -11,3 +11,6 @@ name = "at_codegen"
 at-core = { path = "../core" }
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+insta = "1"

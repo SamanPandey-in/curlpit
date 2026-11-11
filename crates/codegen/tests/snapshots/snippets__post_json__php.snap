@@ -1,0 +1,23 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+<?php
+
+$ch = curl_init();
+curl_setopt_array($ch, [
+    CURLOPT_URL => "https://api.test/users",
+    CURLOPT_CUSTOMREQUEST => "POST",
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => [
+        "Content-Type: application/json",
+    ],
+    CURLOPT_POSTFIELDS => "{\n  \"name\": \"Ada\",\n  \"tags\": [1, 2, 3],\n  \"ok\": true\n}",
+]);
+
+$response = curl_exec($ch);
+$status = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+curl_close($ch);
+
+echo $status, "\n";
+echo $response, "\n";

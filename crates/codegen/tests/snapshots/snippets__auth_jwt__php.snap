@@ -1,0 +1,22 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+<?php
+
+$ch = curl_init();
+curl_setopt_array($ch, [
+    CURLOPT_URL => "https://api.test/me",
+    CURLOPT_CUSTOMREQUEST => "GET",
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => [
+        "Authorization: JWT eyJhbGciOiJIUzI1NiJ9.e30.sig",
+    ],
+]);
+
+$response = curl_exec($ch);
+$status = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+curl_close($ch);
+
+echo $status, "\n";
+echo $response, "\n";

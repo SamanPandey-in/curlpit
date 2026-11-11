@@ -14,17 +14,21 @@ pub enum Lang {
     Curl,
     Python,
     JavaScript,
+    TypeScript,
     Go,
     Rust,
+    Php,
 }
 
 impl Lang {
-    pub const ALL: [Lang; 5] = [
+    pub const ALL: [Lang; 7] = [
         Lang::Curl,
         Lang::Python,
         Lang::JavaScript,
+        Lang::TypeScript,
         Lang::Go,
         Lang::Rust,
+        Lang::Php,
     ];
 
     pub fn label(self) -> &'static str {
@@ -32,8 +36,10 @@ impl Lang {
             Lang::Curl => "cURL",
             Lang::Python => "Python",
             Lang::JavaScript => "JavaScript",
+            Lang::TypeScript => "TypeScript",
             Lang::Go => "Go",
             Lang::Rust => "Rust",
+            Lang::Php => "PHP",
         }
     }
 }
@@ -43,8 +49,10 @@ pub fn generate(b: &Built, lang: Lang) -> String {
         Lang::Curl => curl(b),
         Lang::Python => python(b),
         Lang::JavaScript => javascript(b),
+        Lang::TypeScript => typescript(b),
         Lang::Go => go(b),
         Lang::Rust => rust(b),
+        Lang::Php => php(b),
     }
 }
 
@@ -64,10 +72,41 @@ fn parts(b: &Built) -> Option<&[BuiltPart]> {
     }
 }
 
-/// A double-quoted string literal that is valid in Python, JavaScript and Go
-/// (JSON string syntax is a subset of all three).
+/// A double-quoted string literal that is valid in Python, JavaScript, TypeScript and Go
+/// (JSON string syntax is a subset of all four).
 fn dq(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
+}
+
+/// The names that appear more than once, in first-seen order. Object and dict literals key on
+/// exact string equality, so only an exact repeat collapses; `X-A` next to `x-a` survives even
+/// though HTTP treats the two as one header.
+fn duplicates<'a, I: Iterator<Item = &'a str>>(names: I) -> Vec<&'a str> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut dups: Vec<&str> = Vec::new();
+    for n in names {
+        if seen.contains(&n) {
+            if !dups.contains(&n) {
+                dups.push(n);
+            }
+        } else {
+            seen.push(n);
+        }
+    }
+    dups
+}
+
+/// Header names `b` sends twice. A generator that keys headers by name has to either switch to a
+/// form that keeps them or say out loud that it cannot (D29: a snippet must not disagree with
+/// Send).
+fn header_dups(b: &Built) -> Vec<&str> {
+    duplicates(b.headers.iter().map(|(k, _)| k.as_str()))
+}
+
+fn part_name(p: &BuiltPart) -> &str {
+    match p {
+        BuiltPart::Text { name, .. } | BuiltPart::File { name, .. } => name,
+    }
 }
 
 // ---------------------------------------------------------------- cURL
@@ -110,6 +149,18 @@ fn python(b: &Built) -> String {
     s.push_str(&format!("url = {}\n", dq(&b.url)));
     let mut args = vec![dq(b.method.as_str()), "url".to_string()];
     if !b.headers.is_empty() {
+        // `requests` only takes a mapping of headers, so a repeated name genuinely cannot be
+        // expressed. Say so rather than silently sending something else.
+        let dups = header_dups(b);
+        if !dups.is_empty() {
+            s.push_str(&format!(
+                "# NOTE: requests takes headers as a mapping, so {} repeated header name{} \
+                 cannot be\n# represented here and only the last value of each is sent: {}\n",
+                dups.len(),
+                if dups.len() == 1 { "" } else { "s" },
+                dups.join(", ")
+            ));
+        }
         s.push_str("headers = {\n");
         for (k, v) in &b.headers {
             s.push_str(&format!("    {}: {},\n", dq(k), dq(v)));
@@ -137,19 +188,37 @@ fn python(b: &Built) -> String {
             })
             .collect();
         if !texts.is_empty() {
-            s.push_str("data = {\n");
-            for (k, v) in &texts {
-                s.push_str(&format!("    {}: {},\n", dq(k), dq(v)));
+            // A dict would keep only the last of a repeated name; `requests` also accepts a list
+            // of tuples, which keeps every one.
+            if duplicates(texts.iter().map(|(k, _)| k.as_str())).is_empty() {
+                s.push_str("data = {\n");
+                for (k, v) in &texts {
+                    s.push_str(&format!("    {}: {},\n", dq(k), dq(v)));
+                }
+                s.push_str("}\n");
+            } else {
+                s.push_str("data = [\n");
+                for (k, v) in &texts {
+                    s.push_str(&format!("    ({}, {}),\n", dq(k), dq(v)));
+                }
+                s.push_str("]\n");
             }
-            s.push_str("}\n");
             args.push("data=data".into());
         }
         if !files.is_empty() {
-            s.push_str("files = {\n");
-            for (k, p) in &files {
-                s.push_str(&format!("    {}: open({}, \"rb\"),\n", dq(k), dq(p)));
+            if duplicates(files.iter().map(|(k, _)| k.as_str())).is_empty() {
+                s.push_str("files = {\n");
+                for (k, p) in &files {
+                    s.push_str(&format!("    {}: open({}, \"rb\"),\n", dq(k), dq(p)));
+                }
+                s.push_str("}\n");
+            } else {
+                s.push_str("files = [\n");
+                for (k, p) in &files {
+                    s.push_str(&format!("    ({}, open({}, \"rb\")),\n", dq(k), dq(p)));
+                }
+                s.push_str("]\n");
             }
-            s.push_str("}\n");
             args.push("files=files".into());
         }
     }
@@ -195,11 +264,21 @@ fn javascript(b: &Built) -> String {
     ));
     s.push_str(&format!("  method: {},\n", dq(b.method.as_str())));
     if !b.headers.is_empty() {
-        s.push_str("  headers: {\n");
-        for (k, v) in &b.headers {
-            s.push_str(&format!("    {}: {},\n", dq(k), dq(v)));
+        if header_dups(b).is_empty() {
+            s.push_str("  headers: {\n");
+            for (k, v) in &b.headers {
+                s.push_str(&format!("    {}: {},\n", dq(k), dq(v)));
+            }
+            s.push_str("  },\n");
+        } else {
+            // An object literal keeps only the last of a repeated name. `fetch` also takes the
+            // pairs form, and `Headers` appends rather than replaces, so every one is sent.
+            s.push_str("  headers: [\n");
+            for (k, v) in &b.headers {
+                s.push_str(&format!("    [{}, {}],\n", dq(k), dq(v)));
+            }
+            s.push_str("  ],\n");
         }
-        s.push_str("  },\n");
     }
     if let Some(t) = body_text(b) {
         s.push_str(&format!("  body: {},\n", dq(&t)));
@@ -213,6 +292,76 @@ fn javascript(b: &Built) -> String {
 
 fn file_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+// ---------------------------------------------------------------- TypeScript (fetch)
+
+/// The same request as [`javascript`], but with the annotations a `tsc --strict` reader wants:
+/// `Record<string, string>` headers, a `RequestInit` options object and a typed `Response`.
+/// Files take the same `fs.openAsBlob` route (Node 19.8+) through a named import, so the
+/// snippet type-checks without `esModuleInterop`.
+fn typescript(b: &Built) -> String {
+    let mut s = String::new();
+    let multipart = parts(b);
+    let text = body_text(b);
+    let has_files = multipart
+        .map(|ps| ps.iter().any(|p| matches!(p, BuiltPart::File { .. })))
+        .unwrap_or(false);
+    if has_files {
+        s.push_str("import { openAsBlob } from \"node:fs\";\n\n");
+    }
+    if let Some(ps) = multipart {
+        s.push_str("const form: FormData = new FormData();\n");
+        for p in ps {
+            match p {
+                BuiltPart::Text { name, value } => {
+                    s.push_str(&format!("form.append({}, {});\n", dq(name), dq(value)))
+                }
+                BuiltPart::File { name, path } => s.push_str(&format!(
+                    "form.append({}, await openAsBlob({}), {});\n",
+                    dq(name),
+                    dq(path),
+                    dq(file_name(path))
+                )),
+            }
+        }
+        s.push('\n');
+    }
+    s.push_str(&format!("const url = {};\n", dq(&b.url)));
+    if !b.headers.is_empty() {
+        if header_dups(b).is_empty() {
+            s.push_str("const headers: Record<string, string> = {\n");
+            for (k, v) in &b.headers {
+                s.push_str(&format!("  {}: {},\n", dq(k), dq(v)));
+            }
+            s.push_str("};\n");
+        } else {
+            // `Record<string, string>` cannot hold a repeated name; the pairs form can, and is
+            // just as much a `HeadersInit`.
+            s.push_str("const headers: [string, string][] = [\n");
+            for (k, v) in &b.headers {
+                s.push_str(&format!("  [{}, {}],\n", dq(k), dq(v)));
+            }
+            s.push_str("];\n");
+        }
+    }
+    if let Some(t) = &text {
+        s.push_str(&format!("const body: string = {};\n", dq(t)));
+    }
+    s.push_str("\nconst options: RequestInit = {\n");
+    s.push_str(&format!("  method: {},\n", dq(b.method.as_str())));
+    if !b.headers.is_empty() {
+        s.push_str("  headers,\n");
+    }
+    if text.is_some() {
+        s.push_str("  body,\n");
+    }
+    if multipart.is_some() {
+        s.push_str("  body: form,\n");
+    }
+    s.push_str("};\n\nconst res: Response = await fetch(url, options);\n");
+    s.push_str("console.log(res.status);\nconsole.log(await res.text());\n");
+    s
 }
 
 // ---------------------------------------------------------------- Go (net/http)
@@ -360,6 +509,97 @@ fn rust(b: &Built) -> String {
     s.push_str(
         "        .send()?;\n    println!(\"{}\", response.status());\n    println!(\"{}\", response.text()?);\n    Ok(())\n}\n",
     );
+    s
+}
+
+// ---------------------------------------------------------------- PHP (cURL)
+
+/// A PHP double-quoted string literal. Double quotes are the only PHP form that can spell a
+/// control character, so every value uses them; the cost is interpolation, cancelled by escaping
+/// every `$` (which also neutralises `${` and `{$`, as both need a bare `$`). `\xHH` is always
+/// written with two digits so a following hex digit can't be swallowed, and C1 controls use
+/// `\u{..}` because `\xHH` above 0x7f would emit one raw byte instead of UTF-8. Everything else,
+/// multi-byte UTF-8 included, is kept literally.
+pub fn php_str(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '$' => out.push_str("\\$"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\u{b}' => out.push_str("\\v"),
+            '\u{c}' => out.push_str("\\f"),
+            '\u{1b}' => out.push_str("\\e"),
+            c if c.is_control() && (c as u32) < 0x80 => {
+                out.push_str(&format!("\\x{:02x}", c as u32))
+            }
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn php(b: &Built) -> String {
+    let multipart = parts(b);
+    let mut s = String::from("<?php\n\n$ch = curl_init();\ncurl_setopt_array($ch, [\n");
+    s.push_str(&format!("    CURLOPT_URL => {},\n", php_str(&b.url)));
+    s.push_str(&format!(
+        "    CURLOPT_CUSTOMREQUEST => {},\n",
+        php_str(b.method.as_str())
+    ));
+    s.push_str("    CURLOPT_RETURNTRANSFER => true,\n");
+    if b.method == Method::Head {
+        // CURLOPT_CUSTOMREQUEST alone would leave curl waiting for a body a HEAD never has.
+        s.push_str("    CURLOPT_NOBODY => true,\n");
+    }
+    if !b.headers.is_empty() {
+        s.push_str("    CURLOPT_HTTPHEADER => [\n");
+        for (k, v) in &b.headers {
+            s.push_str(&format!("        {},\n", php_str(&format!("{k}: {v}"))));
+        }
+        s.push_str("    ],\n");
+    }
+    if let Some(t) = body_text(b) {
+        s.push_str(&format!("    CURLOPT_POSTFIELDS => {},\n", php_str(&t)));
+    }
+    if let Some(ps) = multipart {
+        // A PHP array has unique keys and CURLOPT_POSTFIELDS has no list form, so a repeated
+        // part name cannot be expressed without hand-building the multipart body.
+        let dups = duplicates(ps.iter().map(part_name));
+        if !dups.is_empty() {
+            s.push_str(&format!(
+                "    // NOTE: a PHP array has unique keys, so {} repeated part name{} cannot be\n\
+                 \x20   // represented here and only the last value of each is sent: {}\n",
+                dups.len(),
+                if dups.len() == 1 { "" } else { "s" },
+                dups.join(", ")
+            ));
+        }
+        s.push_str("    CURLOPT_POSTFIELDS => [\n");
+        for p in ps {
+            match p {
+                BuiltPart::Text { name, value } => s.push_str(&format!(
+                    "        {} => {},\n",
+                    php_str(name),
+                    php_str(value)
+                )),
+                BuiltPart::File { name, path } => s.push_str(&format!(
+                    "        {} => new CURLFile({}),\n",
+                    php_str(name),
+                    php_str(path)
+                )),
+            }
+        }
+        s.push_str("    ],\n");
+    }
+    s.push_str("]);\n\n$response = curl_exec($ch);\n");
+    s.push_str("$status = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);\ncurl_close($ch);\n\n");
+    s.push_str("echo $status, \"\\n\";\necho $response, \"\\n\";\n");
     s
 }
 

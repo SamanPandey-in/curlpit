@@ -1,0 +1,14 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+const response = await fetch("https://api.test/users", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+  },
+  body: "{\n  \"name\": \"Ada\",\n  \"tags\": [1, 2, 3],\n  \"ok\": true\n}",
+});
+
+console.log(response.status);
+console.log(await response.text());

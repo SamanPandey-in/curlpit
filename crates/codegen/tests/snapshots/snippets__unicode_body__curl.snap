@@ -1,0 +1,8 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+curl -X POST 'https://api.test/unicode' \
+  -H 'X-Emoji: 😀' \
+  -H 'Content-Type: application/json' \
+  --data-raw '{"emoji": "😀🏳️‍🌈", "zwj": "👨‍👩‍👧", "math": "𝒳𝓇", "combining": "école", "cjk": "漢字", "rtl": "مرحبا"}'

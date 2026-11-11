@@ -1,0 +1,6 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+curl 'https://api.test/me' \
+  -H 'Authorization: Basic YWRhOnBAc3M6dydyZA=='

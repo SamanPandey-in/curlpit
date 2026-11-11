@@ -1,0 +1,19 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+<?php
+
+$ch = curl_init();
+curl_setopt_array($ch, [
+    CURLOPT_URL => "https://api.test/search?q=a%20b%20%26%20c%3Dd&page=2&tag=caf%C3%A9%2F%F0%9F%98%80",
+    CURLOPT_CUSTOMREQUEST => "GET",
+    CURLOPT_RETURNTRANSFER => true,
+]);
+
+$response = curl_exec($ch);
+$status = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+curl_close($ch);
+
+echo $status, "\n";
+echo $response, "\n";

@@ -1,0 +1,16 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+// Cargo.toml: reqwest = { version = "0.12", features = ["blocking"] }
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let response = reqwest::blocking::Client::new()
+        .request(reqwest::Method::GET, "https://api.test/me")
+        .header("X-Sig", "abc'def")
+        .header("X-Ts", "1699999999")
+        .send()?;
+    println!("{}", response.status());
+    println!("{}", response.text()?);
+    Ok(())
+}

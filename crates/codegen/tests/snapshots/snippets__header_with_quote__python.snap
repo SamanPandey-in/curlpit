@@ -1,0 +1,16 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+import requests
+
+url = "https://api.test/headers"
+headers = {
+    "X-Quote": "he said \"hi\" and it's 'fine'",
+    "X-Dollar": "cost $5 {$x} ${y} `tick`",
+    "X-Backslash": "C:\\path\\to\\thing",
+}
+
+response = requests.request("GET", url, headers=headers)
+print(response.status_code)
+print(response.text)
