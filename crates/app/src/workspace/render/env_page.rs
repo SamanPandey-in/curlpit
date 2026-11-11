@@ -2,7 +2,8 @@
 //! secret/reveal controls, and the import/export footer.
 
 use crate::sidebar::Scope;
-use crate::ui::{c, seg_btn, Status};
+use crate::theme::Palette;
+use crate::ui::{seg_btn, seg_btn_ix, Status};
 use crate::workspace::Workspace;
 use at_core::EnvVar;
 use gpui::prelude::*;
@@ -10,12 +11,11 @@ use gpui::{div, px, Context, Hsla};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::Input;
-use gpui_component::ActiveTheme as _;
 
 impl Workspace {
     pub(crate) fn render_env_page(&self, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let (muted, border) = (theme.muted_foreground, theme.border);
+        let p = Palette::of(cx);
+        let (muted, border) = (p.text_muted(), p.border());
 
         let header = div()
             .flex()
@@ -39,12 +39,12 @@ impl Workspace {
             .gap_1()
             .px_2()
             .pb_2();
-        let g = Button::new("env-scope-g").label("Globals");
-        let g = if self.env_scope == Scope::Globals {
-            g.primary()
-        } else {
-            g
-        };
+        let g = seg_btn(
+            "env-scope-g",
+            "Globals".to_string(),
+            self.env_scope == Scope::Globals,
+            cx,
+        );
         scopes = scopes.child(g.on_click(
             cx.listener(|this, _ev, window, cx| this.select_scope(Scope::Globals, window, cx)),
         ));
@@ -54,12 +54,13 @@ impl Workspace {
             } else {
                 e.name.clone()
             };
-            let b = Button::new(("env-scope", ix)).label(label);
-            let b = if self.env_scope == Scope::Env(ix) {
-                b.primary()
-            } else {
-                b
-            };
+            let b = seg_btn_ix(
+                "env-scope",
+                ix,
+                &label,
+                self.env_scope == Scope::Env(ix),
+                cx,
+            );
             scopes = scopes.child(b.on_click(cx.listener(move |this, _ev, window, cx| {
                 this.select_scope(Scope::Env(ix), window, cx)
             })));
@@ -149,8 +150,7 @@ impl Workspace {
                     .child(div().w(px(36.)).flex_none()),
             );
         for (ix, row) in self.env_rows.iter().enumerate() {
-            let sec = Button::new(("env-sec", ix)).label("Secret");
-            let sec = if row.secret { sec.primary() } else { sec };
+            let sec = seg_btn_ix("env-sec", ix, "Secret", row.secret, cx);
             let reveal = row.secret.then(|| {
                 Button::new(("env-show", ix))
                     .label(if row.revealed { "Hide" } else { "Show" })
@@ -252,6 +252,7 @@ impl Workspace {
                         "Include secrets: off".to_string()
                     },
                     self.export_secrets,
+                    cx,
                 )
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.export_secrets = !this.export_secrets;
@@ -266,7 +267,7 @@ impl Workspace {
 
         let (msg, msg_col): (String, Hsla) = match &self.status {
             Status::Info(m) => (m.clone(), muted),
-            Status::Error(e) => (e.clone(), c(0xf38ba8)),
+            Status::Error(e) => (e.clone(), p.status_error()),
             _ => (String::new(), muted),
         };
 

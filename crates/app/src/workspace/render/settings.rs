@@ -2,16 +2,17 @@
 //! verification.
 
 use crate::request_tab::RequestTab;
-use crate::ui::{c, seg_btn_ix};
+use crate::theme::Palette;
+use crate::ui::seg_btn_ix;
 use crate::workspace::Workspace;
 use gpui::prelude::*;
 use gpui::{div, px, Context};
 use gpui_component::input::Input;
-use gpui_component::ActiveTheme as _;
 
 impl Workspace {
     pub(crate) fn render_settings(&self, tab: &RequestTab, cx: &Context<Self>) -> impl IntoElement {
-        let muted = cx.theme().muted_foreground;
+        let p = Palette::of(cx);
+        let muted = p.text_muted();
         div()
             .p_2()
             .flex()
@@ -48,6 +49,7 @@ impl Workspace {
                                 "Follow redirects: off"
                             },
                             tab.follow_redirects,
+                            cx,
                         )
                         .on_click(cx.listener(|this, _ev, _window, cx| {
                             let tab = this.tab_mut();
@@ -65,6 +67,7 @@ impl Workspace {
                                 "Verify TLS certificates: off"
                             },
                             tab.verify_tls,
+                            cx,
                         )
                         .on_click(cx.listener(|this, _ev, _window, cx| {
                             let tab = this.tab_mut();
@@ -75,7 +78,7 @@ impl Workspace {
             )
             .children((!tab.verify_tls).then(|| {
                 div()
-                    .text_color(c(0xf9e2af))
+                    .text_color(p.warning_text())
                     .child("Certificate checks are off for this request: only use this for local or test servers.")
             }))
     }

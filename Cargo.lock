@@ -475,6 +475,7 @@ dependencies = [
  "at-store",
  "gpui",
  "gpui-component",
+ "serde_json",
  "tokio",
  "tokio-util",
 ]

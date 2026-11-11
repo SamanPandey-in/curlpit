@@ -1,72 +1,74 @@
 //! The response's JSON tree pane: fold controls, the copy buttons, and a virtualized
 //! list of tree rows coloured by JSON type (FR-RES-03).
 
+use crate::theme::{Palette, S1, S2, S3};
 use crate::tree::{tree_value_display, TreeCopy};
-use crate::ui::{c, kind_color};
+use crate::ui::quiet_btn;
 use crate::workspace::Workspace;
 use gpui::prelude::*;
 use gpui::{div, px, uniform_list, AnyElement, Context};
-use gpui_component::button::Button;
-use gpui_component::ActiveTheme as _;
 
 impl Workspace {
     /// The Tree view: fold controls, the three copy buttons, and a virtualized tree of the
     /// response (FR-RES-03).
     pub(crate) fn render_tree(&self, cx: &Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let (muted, accent) = (theme.muted_foreground, theme.accent);
+        let p = Palette::of(cx);
+        let (muted, selected_bg) = (p.text_muted(), p.element_selected());
         let tab = self.tab();
         let (tv, data) = match (tab.tree.as_ref(), tab.view.as_ref()) {
             (Some(Ok(tv)), Some(v)) => (tv, v.data.clone()),
             (Some(Err(e)), _) => {
                 return div()
-                    .p_4()
-                    .text_color(muted)
+                    .p(px(S3))
+                    .text_color(p.status_error())
                     .child(e.clone())
                     .into_any_element()
             }
             _ => {
                 return div()
-                    .p_4()
-                    .text_color(muted)
+                    .p(px(S3))
+                    .text_color(p.text_placeholder())
                     .child("Send a request to see the response")
                     .into_any_element()
             }
         };
 
-        let bar =
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .p_2()
-                .child(
-                    Button::new("tree-expand")
-                        .label("Expand all")
-                        .on_click(cx.listener(|this, _ev, _window, cx| this.tree_fold(true, cx))),
-                )
-                .child(
-                    Button::new("tree-collapse")
-                        .label("Collapse all")
-                        .on_click(cx.listener(|this, _ev, _window, cx| this.tree_fold(false, cx))),
-                )
-                .child(div().flex_1())
-                .child(Button::new("tree-copy-value").label("Copy value").on_click(
+        let bar = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(S1))
+            .p(px(S2))
+            .child(
+                quiet_btn("tree-expand", "Expand all".to_string(), cx)
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.tree_fold(true, cx))),
+            )
+            .child(
+                quiet_btn("tree-collapse", "Collapse all".to_string(), cx)
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.tree_fold(false, cx))),
+            )
+            .child(div().flex_1())
+            .child(
+                quiet_btn("tree-copy-value", "Copy value".to_string(), cx).on_click(
                     cx.listener(|this, _ev, _window, cx| this.tree_copy(TreeCopy::Value, cx)),
-                ))
-                .child(Button::new("tree-copy-path").label("Copy path").on_click(
+                ),
+            )
+            .child(
+                quiet_btn("tree-copy-path", "Copy path".to_string(), cx).on_click(
                     cx.listener(|this, _ev, _window, cx| this.tree_copy(TreeCopy::Path, cx)),
-                ))
-                .child(Button::new("tree-copy-all").label("Copy all").on_click(
+                ),
+            )
+            .child(
+                quiet_btn("tree-copy-all", "Copy all".to_string(), cx).on_click(
                     cx.listener(|this, _ev, _window, cx| this.tree_copy(TreeCopy::All, cx)),
-                ));
+                ),
+            );
 
         let handle = cx.entity();
         let rows = tv.rows.clone();
         let tree = tv.tree.clone();
         let selected = tv.selected;
-        let key_col = c(0x89b4fa);
+        let key_col = p.json_key();
         let list =
             uniform_list("json-tree", rows.len(), move |range, _window, _cx| {
                 let mut items = Vec::new();
@@ -96,10 +98,10 @@ impl Workspace {
                             .flex_row()
                             .items_center()
                             .h(px(18.))
-                            .gap_1()
-                            .pr_2()
+                            .gap(px(S1))
+                            .pr(px(S2))
                             .pl(px(8.0 + f32::from(node.depth.min(40)) * 14.0))
-                            .when(selected == Some(ix), |d| d.bg(accent))
+                            .when(selected == Some(ix), |d| d.bg(selected_bg))
                             .on_click(move |_ev, _window, cx| {
                                 handle.update(cx, |this, cx| this.on_tree_row(ix, cx));
                             })
@@ -111,7 +113,7 @@ impl Workspace {
                                 div()
                                     .overflow_hidden()
                                     .whitespace_nowrap()
-                                    .text_color(kind_color(node.kind))
+                                    .text_color(p.json_kind(node.kind))
                                     .child(value),
                             )
                             .into_any_element(),

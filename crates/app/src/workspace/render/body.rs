@@ -27,7 +27,7 @@ impl Workspace {
         .enumerate()
         {
             modes = modes.child(
-                seg_btn_ix("body-mode", i, label, tab.body_mode == mode).on_click(cx.listener(
+                seg_btn_ix("body-mode", i, label, tab.body_mode == mode, cx).on_click(cx.listener(
                     move |this, _ev, _window, cx| {
                         this.tab_mut().body_mode = mode;
                         cx.notify();
@@ -39,7 +39,7 @@ impl Workspace {
             modes = modes.child(div().w(px(12.)));
             for (i, kind) in RawKind::ALL.into_iter().enumerate() {
                 modes = modes.child(
-                    seg_btn_ix("raw-kind", i, kind.label(), tab.raw_kind == kind).on_click(
+                    seg_btn_ix("raw-kind", i, kind.label(), tab.raw_kind == kind, cx).on_click(
                         cx.listener(move |this, _ev, _window, cx| {
                             this.tab_mut().raw_kind = kind;
                             cx.notify();

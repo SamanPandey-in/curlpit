@@ -19,7 +19,8 @@ use crate::editor::{next_method, AuthKind, ReqTab, Which};
 use crate::format::{body_label, human};
 use crate::response::{row_spans, ResTab, Span, FIND_MAX};
 use crate::sidebar::{ItemKind, MainView, SideView};
-use crate::ui::{avail_width, c, char_w, mono, seg_btn, status_color, Status, GUTTER};
+use crate::theme::{Palette, ROW_PAD_Y, S1, S2, S3};
+use crate::ui::{avail_width, char_w, mono, quiet_btn, seg_btn, tab_btn, Status, GUTTER};
 use crate::workspace::Workspace;
 use at_core::lines::{build_rows, CONT};
 use at_history::{ago, now_ms};
@@ -27,7 +28,6 @@ use gpui::prelude::*;
 use gpui::{div, px, uniform_list, ClipboardItem, Context, Hsla, ScrollWheelEvent, Window};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::Input;
-use gpui_component::ActiveTheme as _;
 use std::sync::Arc;
 
 impl Render for Workspace {
@@ -73,25 +73,26 @@ impl Render for Workspace {
             .unwrap_or(false);
         let scroll_x = if tab.wrap { 0.0 } else { tab.scroll_x };
 
-        let theme = cx.theme();
-        let (bg, fg, muted, border, accent) = (
-            theme.background,
-            theme.foreground,
-            theme.muted_foreground,
-            theme.border,
-            theme.accent,
-        );
+        // One palette, read once: the window, the library's widgets and everything drawn
+        // by hand below all come from here (see `theme`).
+        let p = Palette::of(cx);
+        let (bg, fg, muted) = (p.editor_background(), p.text(), p.text_muted());
         let in_flight = tab.cancel.is_some();
 
         // ---- tab bar: one button per open request, ● marks unsaved changes ----
+        // The tab bar is chrome, so it takes the panel surface and the active tab is the
+        // pane showing through it, the way Zed's tabs read.
         let mut tab_bar = div()
             .id("tab-bar")
             .flex()
             .flex_row()
             .items_center()
-            .gap_1()
-            .px_2()
-            .pt_2()
+            .gap(px(S1))
+            .px(px(S2))
+            .pt(px(S1))
+            .bg(p.surface())
+            .border_b_1()
+            .border_color(p.border())
             .overflow_x_scroll();
         for (ix, t) in self.tabs.iter().enumerate() {
             let label = format!(
@@ -100,36 +101,37 @@ impl Render for Workspace {
                 if t.is_dirty(cx) { "● " } else { "" },
                 t.title(cx)
             );
-            let b = Button::new(("tab", ix)).label(label);
-            let b = if ix == self.active { b.primary() } else { b };
-            tab_bar = tab_bar.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_none()
-                    .child(b.on_click(
-                        cx.listener(move |this, _ev, window, cx| this.activate_tab(ix, window, cx)),
-                    ))
-                    .child(
-                        Button::new(("tab-x", ix))
-                            .label(if t.confirm_close { "Discard?" } else { "✕" })
-                            .on_click(cx.listener(move |this, _ev, window, cx| {
-                                this.close_tab(ix, window, cx)
-                            })),
-                    ),
-            );
+            let b = tab_btn(("tab", ix), label, ix == self.active, cx);
+            tab_bar =
+                tab_bar.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_none()
+                        .child(b.on_click(cx.listener(move |this, _ev, window, cx| {
+                            this.activate_tab(ix, window, cx)
+                        })))
+                        .child(
+                            quiet_btn(
+                                ("tab-x", ix),
+                                if t.confirm_close { "Discard?" } else { "✕" }.to_string(),
+                                cx,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _ev, window, cx| this.close_tab(ix, window, cx),
+                            )),
+                        ),
+                );
         }
         tab_bar = tab_bar.child(
             div().flex_none().child(
-                Button::new("tab-new")
-                    .label("+")
+                quiet_btn("tab-new", "+".to_string(), cx)
                     .on_click(cx.listener(|this, _ev, window, cx| this.add_tab(window, cx))),
             ),
         );
         tab_bar = tab_bar.child(
             div().flex_none().child(
-                Button::new("tab-curl")
-                    .label("+ cURL")
+                quiet_btn("tab-curl", "+ cURL".to_string(), cx)
                     .on_click(cx.listener(|this, _ev, window, cx| this.on_paste_curl(window, cx))),
             ),
         );
@@ -138,8 +140,8 @@ impl Render for Workspace {
             .flex()
             .flex_row()
             .items_center()
-            .gap_2()
-            .p_2()
+            .gap(px(S2))
+            .p(px(S2))
             .child(div().w(px(180.)).flex_none().child(Input::new(&tab.name)))
             .child(
                 Button::new("method")
@@ -203,13 +205,14 @@ impl Render for Workspace {
         let req_tabs = div()
             .flex()
             .flex_row()
-            .gap_1()
-            .px_2()
+            .gap(px(S1))
+            .px(px(S2))
             .child(
                 seg_btn(
                     "t-params",
                     format!("Params ({pcount})"),
                     tab.req_tab == ReqTab::Params,
+                    cx,
                 )
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.tab_mut().req_tab = ReqTab::Params;
@@ -221,6 +224,7 @@ impl Render for Workspace {
                     "t-headers",
                     format!("Headers ({hcount})"),
                     tab.req_tab == ReqTab::Headers,
+                    cx,
                 )
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.tab_mut().req_tab = ReqTab::Headers;
@@ -232,6 +236,7 @@ impl Render for Workspace {
                     "t-body",
                     body_label(tab.body_mode, tab.raw_kind),
                     tab.req_tab == ReqTab::Body,
+                    cx,
                 )
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.tab_mut().req_tab = ReqTab::Body;
@@ -246,6 +251,7 @@ impl Render for Workspace {
                         k => format!("Auth ({})", k.label()),
                     },
                     tab.req_tab == ReqTab::Auth,
+                    cx,
                 )
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.tab_mut().req_tab = ReqTab::Auth;
@@ -261,6 +267,7 @@ impl Render for Workspace {
                         "Scripts".to_string()
                     },
                     tab.req_tab == ReqTab::Scripts,
+                    cx,
                 )
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.tab_mut().req_tab = ReqTab::Scripts;
@@ -272,6 +279,7 @@ impl Render for Workspace {
                     "t-settings",
                     "Settings".to_string(),
                     tab.req_tab == ReqTab::Settings,
+                    cx,
                 )
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.tab_mut().req_tab = ReqTab::Settings;
@@ -303,86 +311,109 @@ impl Render for Workspace {
                 size,
             } => (
                 format!("{code} {text}   ·   {ms} ms   ·   {}", human(*size)),
-                status_color(*code),
+                p.status_class(*code),
             ),
-            Status::Error(e) => (e.clone(), c(0xf38ba8)),
+            Status::Error(e) => (e.clone(), p.status_error()),
         };
 
         // The wrap toggle appears only when text overflows the window (or while wrap is on).
         let wrap_btn = (tab.res_tab == ResTab::Body && (tab.wrap || overflow)).then(|| {
-            Button::new("wrap")
-                .label(if tab.wrap { "Wrap: on" } else { "Wrap: off" })
-                .on_click(cx.listener(|this, _ev, _window, cx| {
-                    let tab = this.tab_mut();
-                    tab.wrap = !tab.wrap;
-                    tab.scroll_x = 0.0;
-                    if !tab.wrap {
-                        if let Some(v) = tab.view.as_mut() {
-                            v.wrapped = None;
-                        }
+            quiet_btn(
+                "wrap",
+                if tab.wrap { "Wrap: on" } else { "Wrap: off" }.to_string(),
+                cx,
+            )
+            .on_click(cx.listener(|this, _ev, _window, cx| {
+                let tab = this.tab_mut();
+                tab.wrap = !tab.wrap;
+                tab.scroll_x = 0.0;
+                if !tab.wrap {
+                    if let Some(v) = tab.view.as_mut() {
+                        v.wrapped = None;
                     }
-                    cx.notify();
-                }))
+                }
+                cx.notify();
+            }))
         });
 
         // Copy the (pretty-printed) response body to the clipboard (FR-RES-01).
         let copy_btn = (tab.res_tab == ResTab::Body && tab.view.is_some()).then(|| {
-            Button::new("copy")
-                .label(if tab.copied { "Copied ✓" } else { "Copy" })
-                .on_click(cx.listener(|this, _ev, _window, cx| {
-                    let tab = this.tab_mut();
-                    if let Some(v) = &tab.view {
-                        let text = String::from_utf8_lossy(&v.data).into_owned();
-                        cx.write_to_clipboard(ClipboardItem::new_string(text));
-                        tab.copied = true;
-                        cx.notify();
-                    }
-                }))
+            quiet_btn(
+                "copy",
+                if tab.copied { "Copied ✓" } else { "Copy" }.to_string(),
+                cx,
+            )
+            .on_click(cx.listener(|this, _ev, _window, cx| {
+                let tab = this.tab_mut();
+                if let Some(v) = &tab.view {
+                    let text = String::from_utf8_lossy(&v.data).into_owned();
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    tab.copied = true;
+                    cx.notify();
+                }
+            }))
         });
 
+        // The status row divides the request editor from the response, so it gets the
+        // panel surface and a hairline on each side rather than floating between them.
         let status_row = div()
             .flex()
             .flex_row()
             .items_center()
             .justify_between()
-            .px_3()
-            .py_1()
+            .px(px(S3))
+            .py(px(ROW_PAD_Y))
+            .bg(p.surface())
+            .border_t_1()
+            .border_b_1()
+            .border_color(p.border())
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .gap_3()
+                    .gap(px(S3))
                     .child(div().text_color(status_col).child(status_text))
                     .children(
                         tab.warning
                             .clone()
-                            .map(|w| div().text_color(c(0xf9e2af)).child(w)),
+                            .map(|w| div().text_color(p.warning_text()).child(w)),
                     ),
             )
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .gap_1()
+                    .gap(px(S1))
                     .child(
-                        seg_btn("r-body", "Body".to_string(), tab.res_tab == ResTab::Body)
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.tab_mut().res_tab = ResTab::Body;
-                                cx.notify();
-                            })),
+                        seg_btn(
+                            "r-body",
+                            "Body".to_string(),
+                            tab.res_tab == ResTab::Body,
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                            this.tab_mut().res_tab = ResTab::Body;
+                            cx.notify();
+                        })),
                     )
                     .child(
-                        seg_btn("r-tree", "Tree".to_string(), tab.res_tab == ResTab::Tree)
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.tab_mut().res_tab = ResTab::Tree;
-                                cx.notify();
-                            })),
+                        seg_btn(
+                            "r-tree",
+                            "Tree".to_string(),
+                            tab.res_tab == ResTab::Tree,
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                            this.tab_mut().res_tab = ResTab::Tree;
+                            cx.notify();
+                        })),
                     )
                     .child(
                         seg_btn(
                             "r-headers",
                             format!("Headers ({})", tab.resp_headers.len()),
                             tab.res_tab == ResTab::Headers,
+                            cx,
                         )
                         .on_click(cx.listener(|this, _ev, _window, cx| {
                             this.tab_mut().res_tab = ResTab::Headers;
@@ -397,6 +428,7 @@ impl Render for Workspace {
                                 .map(|r| r.label())
                                 .unwrap_or_else(|| "Tests".to_string()),
                             tab.res_tab == ResTab::Tests,
+                            cx,
                         )
                         .on_click(cx.listener(|this, _ev, _window, cx| {
                             this.tab_mut().res_tab = ResTab::Tests;
@@ -404,24 +436,29 @@ impl Render for Workspace {
                         })),
                     )
                     .child(
-                        seg_btn("r-code", "Code".to_string(), tab.res_tab == ResTab::Code)
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.tab_mut().res_tab = ResTab::Code;
-                                this.code_copied = false;
-                                cx.notify();
-                            })),
+                        seg_btn(
+                            "r-code",
+                            "Code".to_string(),
+                            tab.res_tab == ResTab::Code,
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                            this.tab_mut().res_tab = ResTab::Code;
+                            this.code_copied = false;
+                            cx.notify();
+                        })),
                     )
                     .children(copy_btn)
                     .children(
                         (tab.res_tab == ResTab::Body && tab.view.is_some()).then(|| {
-                            Button::new("save-body").label("Save…").on_click(
+                            quiet_btn("save-body", "Save…".to_string(), cx).on_click(
                                 cx.listener(|this, _ev, window, cx| this.on_save_body(window, cx)),
                             )
                         }),
                     )
                     .children(
                         (tab.res_tab == ResTab::Body && tab.view.is_some()).then(|| {
-                            Button::new("find-open").label("Find").on_click(
+                            quiet_btn("find-open", "Find".to_string(), cx).on_click(
                                 cx.listener(|this, _ev, window, cx| this.open_find(window, cx)),
                             )
                         }),
@@ -441,6 +478,12 @@ impl Render for Workspace {
                     None
                 };
                 // Every match on screen is highlighted inside its line (FR-RES-05).
+                // Find colours are resolved out here: the list closure outlives this render
+                // pass, so it cannot look the theme up for itself.
+                let (hit_bg, cur_bg, hit_fg) =
+                    (p.find_match_bg(), p.find_current_bg(), p.find_match_fg());
+                let (row_bg, gutter_fg, rule) =
+                    (p.find_row_bg(), p.gutter_text(), p.border_variant());
                 let (hits, hit_len, cur_hit) = if tab.find_open {
                     (
                         tab.matches.clone(),
@@ -478,16 +521,16 @@ impl Render for Workspace {
                                 .flex()
                                 .flex_row()
                                 .h(px(18.))
-                                .when(hl_row == Some(ix), |d| d.bg(accent))
+                                .when(hl_row == Some(ix), |d| d.bg(row_bg))
                                 // sticky gutter: lives outside the horizontally shifted text
                                 .child(
                                     div()
                                         .w(px(GUTTER))
                                         .flex_none()
-                                        .px_2()
-                                        .text_color(muted)
+                                        .px(px(S2))
+                                        .text_color(gutter_fg)
                                         .border_r_1()
-                                        .border_color(border)
+                                        .border_color(rule)
                                         .child(label),
                                 )
                                 .child(
@@ -501,15 +544,13 @@ impl Render for Workspace {
                                             .whitespace_nowrap()
                                             .children(spans.into_iter().map(|(s, kind)| {
                                                 let d = div().whitespace_nowrap().child(s);
-                                                // fixed colours, so a match stays readable in
-                                                // both the light and the dark theme
+                                                // theme-aware: the text on a highlight is the
+                                                // pane colour, so it inverts with the appearance
                                                 match kind {
                                                     Span::Current => {
-                                                        d.bg(c(0xfab387)).text_color(c(0x11111b))
+                                                        d.bg(cur_bg).text_color(hit_fg)
                                                     }
-                                                    Span::Hit => {
-                                                        d.bg(c(0xf9e2af)).text_color(c(0x11111b))
-                                                    }
+                                                    Span::Hit => d.bg(hit_bg).text_color(hit_fg),
                                                     Span::Plain => d,
                                                 }
                                             })),
@@ -524,8 +565,8 @@ impl Render for Workspace {
                 .into_any_element()
             }
             None => div()
-                .p_4()
-                .text_color(muted)
+                .p(px(S3))
+                .text_color(p.text_placeholder())
                 .child("Send a request to see the response")
                 .into_any_element(),
         };
@@ -546,32 +587,35 @@ impl Render for Workspace {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_1()
+                    .gap(px(S1))
+                    .px(px(S2))
+                    .py(px(ROW_PAD_Y))
+                    .bg(p.surface())
                     .border_b_1()
-                    .border_color(border)
+                    .border_color(p.border())
                     .child(div().w(px(260.)).child(Input::new(&tab.find)))
                     .child(div().w(px(90.)).text_color(muted).child(count))
-                    .child(Button::new("find-prev").label("↑").on_click(
+                    .child(quiet_btn("find-prev", "↑".to_string(), cx).on_click(
                         cx.listener(move |this, _ev, _window, cx| this.find_step(id, -1, cx)),
                     ))
-                    .child(Button::new("find-next").label("↓").on_click(
+                    .child(quiet_btn("find-next", "↓".to_string(), cx).on_click(
                         cx.listener(move |this, _ev, _window, cx| this.find_step(id, 1, cx)),
                     ))
-                    .child(Button::new("find-close").label("✕").on_click(cx.listener(
-                        |this, _ev, window, cx| {
-                            // closing is also "clear" (FR-RES-05): no stale query or matches
-                            let find = this.tab().find.clone();
-                            find.update(cx, |s, cx| s.set_value(String::new(), window, cx));
-                            let tab = this.tab_mut();
-                            tab.find_open = false;
-                            tab.matches.clear();
-                            tab.match_ix = 0;
-                            this.refocus(window);
-                            cx.notify();
-                        },
-                    )))
+                    .child(
+                        quiet_btn("find-close", "✕".to_string(), cx).on_click(cx.listener(
+                            |this, _ev, window, cx| {
+                                // closing is also "clear" (FR-RES-05): no stale query or matches
+                                let find = this.tab().find.clone();
+                                find.update(cx, |s, cx| s.set_value(String::new(), window, cx));
+                                let tab = this.tab_mut();
+                                tab.find_open = false;
+                                tab.matches.clear();
+                                tab.match_ix = 0;
+                                this.refocus(window);
+                                cx.notify();
+                            },
+                        )),
+                    )
             });
 
         let resp_area = match tab.res_tab {
@@ -586,15 +630,15 @@ impl Render for Workspace {
                 .id("resp-headers")
                 .size_full()
                 .overflow_y_scroll()
-                .p_2()
+                .p(px(S2))
                 .flex()
                 .flex_col()
-                .gap_1()
+                .gap(px(S1))
                 .children(tab.resp_headers.iter().map(|(k, v)| {
                     div()
                         .flex()
                         .flex_row()
-                        .gap_3()
+                        .gap(px(S3))
                         .child(
                             div()
                                 .w(px(240.))
@@ -619,8 +663,8 @@ impl Render for Workspace {
         if self.items.is_empty() {
             side_list = side_list.child(
                 div()
-                    .p_2()
-                    .text_color(muted)
+                    .p(px(S2))
+                    .text_color(p.text_placeholder())
                     .child("No collections yet. Press + or just Save a request."),
             );
         }
@@ -636,18 +680,23 @@ impl Render for Workspace {
                 ItemKind::Collection => ("▾ ", fg),
                 ItemKind::Folder => ("▸ ", fg),
                 ItemKind::Request => ("", fg),
-                ItemKind::Broken(_) => ("⚠ ", c(0xf38ba8)),
+                ItemKind::Broken(_) => ("⚠ ", p.status_error()),
             };
             side_list = side_list.child(
                 div()
                     .id(("side", ix))
                     .w_full()
-                    .py_1()
-                    .pl(px(8.0 + item.depth as f32 * 14.0))
-                    .pr_2()
+                    .py(px(S1))
+                    .pl(px(S2 + item.depth as f32 * 14.0))
+                    .pr(px(S2))
                     .text_color(color)
                     .cursor_pointer()
-                    .bg(if selected { accent } else { bg })
+                    // transparent, not the window colour: the sidebar has a surface of its own
+                    .bg(if selected {
+                        p.element_selected()
+                    } else {
+                        Hsla::transparent_black()
+                    })
                     .child(format!("{prefix}{}", item.label))
                     .on_click(cx.listener(move |this, _ev, window, cx| {
                         this.on_sidebar_click(ix, window, cx)
@@ -658,13 +707,16 @@ impl Render for Workspace {
             .flex()
             .flex_row()
             .items_center()
-            .gap_1()
-            .p_2()
+            .gap(px(S1))
+            .p(px(S2))
+            .border_b_1()
+            .border_color(p.border())
             .child(
                 seg_btn(
                     "side-col",
                     "Collections".to_string(),
                     self.side_view == SideView::Collections,
+                    cx,
                 )
                 .on_click(
                     cx.listener(|this, _ev, _window, cx| this.show_side(SideView::Collections, cx)),
@@ -675,6 +727,7 @@ impl Render for Workspace {
                     "side-hist",
                     "History".to_string(),
                     self.side_view == SideView::History,
+                    cx,
                 )
                 .on_click(
                     cx.listener(|this, _ev, _window, cx| this.show_side(SideView::History, cx)),
@@ -682,8 +735,7 @@ impl Render for Workspace {
             )
             .child(div().flex_1())
             .children((self.side_view == SideView::Collections).then(|| {
-                Button::new("new-col")
-                    .label("+")
+                quiet_btn("new-col", "+".to_string(), cx)
                     .on_click(cx.listener(|this, _ev, _window, cx| this.on_new_collection(cx)))
             }));
 
@@ -693,18 +745,19 @@ impl Render for Workspace {
             .h_full()
             .flex()
             .flex_col()
+            .bg(p.surface())
             .border_r_1()
-            .border_color(border)
+            .border_color(p.border())
             .child(side_head);
         sidebar = match self.side_view {
             SideView::Collections => sidebar.child(side_list).child(
                 div()
                     .flex()
                     .flex_row()
-                    .gap_1()
-                    .p_2()
+                    .gap(px(S1))
+                    .p(px(S2))
                     .border_t_1()
-                    .border_color(border)
+                    .border_color(p.border())
                     .child(
                         Button::new("col-import").label("Import…").on_click(
                             cx.listener(|this, _ev, window, cx| this.on_import(window, cx)),
@@ -737,30 +790,35 @@ impl Render for Workspace {
                     } else {
                         "No matches."
                     };
-                    list = list.child(div().p_2().text_color(muted).child(empty));
+                    list = list.child(
+                        div()
+                            .p(px(S2))
+                            .text_color(p.text_placeholder())
+                            .child(empty),
+                    );
                 }
                 for (ix, s) in self.hist_items.iter().enumerate() {
                     let (code, code_col) = match s.status {
-                        Some(n) => (n.to_string(), status_color(n)),
-                        None => ("ERR".to_string(), c(0xf38ba8)),
+                        Some(n) => (n.to_string(), p.status_class(n)),
+                        None => ("ERR".to_string(), p.status_error()),
                     };
                     let id = s.id;
                     list = list.child(
                         div()
                             .id(("hist", ix))
                             .w_full()
-                            .px_2()
-                            .py_1()
+                            .px(px(S2))
+                            .py(px(S1))
                             .cursor_pointer()
                             .flex()
                             .flex_col()
                             .border_b_1()
-                            .border_color(border)
+                            .border_color(p.border_variant())
                             .child(
                                 div()
                                     .flex()
                                     .flex_row()
-                                    .gap_2()
+                                    .gap(px(S2))
                                     .child(s.method.clone())
                                     .child(div().text_color(code_col).child(code))
                                     .child(div().flex_1())
@@ -782,9 +840,9 @@ impl Render for Workspace {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_1()
-                    .px_2()
-                    .pb_2()
+                    .gap(px(S1))
+                    .px(px(S2))
+                    .pb(px(S2))
                     .child(div().flex_1().child(Input::new(&self.hist_search)))
                     .child(
                         Button::new("hist-clear")
@@ -804,11 +862,13 @@ impl Render for Workspace {
                     );
                 sidebar
                     .children(self.history.is_some().then_some(tools))
-                    .children(
-                        self.hist_error
-                            .clone()
-                            .map(|e| div().px_2().pb_2().text_color(c(0xf38ba8)).child(e)),
-                    )
+                    .children(self.hist_error.clone().map(|e| {
+                        div()
+                            .px(px(S2))
+                            .pb(px(S2))
+                            .text_color(p.status_error())
+                            .child(e)
+                    }))
                     .child(list)
             }
         };
