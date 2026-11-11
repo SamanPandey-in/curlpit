@@ -2,7 +2,8 @@
 //! pass/fail list plus console output of the last send.
 
 use crate::request_tab::RequestTab;
-use crate::ui::{c, mono, seg_btn_ix};
+use crate::theme::Palette;
+use crate::ui::{mono, seg_btn_ix};
 use crate::workspace::Workspace;
 use at_script::LogLevel;
 use gpui::prelude::*;
@@ -72,6 +73,7 @@ impl Workspace {
                     0,
                     &label("Pre-request", &tab.pre_script),
                     !show_tests,
+                    cx,
                 )
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.tab_mut().scripts_show_tests = false;
@@ -84,6 +86,7 @@ impl Workspace {
                     1,
                     &label("Tests", &tab.test_script),
                     show_tests,
+                    cx,
                 )
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.tab_mut().scripts_show_tests = true;
@@ -141,8 +144,9 @@ impl Workspace {
     }
 
     pub(crate) fn render_tests(&self, tab: &RequestTab, cx: &Context<Self>) -> impl IntoElement {
-        let muted = cx.theme().muted_foreground;
-        let (green, red, amber) = (c(0xa6e3a1), c(0xf38ba8), c(0xf9e2af));
+        let p = Palette::of(cx);
+        let muted = p.text_muted();
+        let (green, red, amber) = (p.success_text(), p.status_error(), p.warning_text());
         let mut col = div()
             .id("tests-view")
             .size_full()
@@ -201,7 +205,7 @@ impl Workspace {
                 let colour = match l.level {
                     LogLevel::Warn => amber,
                     LogLevel::Error => red,
-                    LogLevel::Log | LogLevel::Info => cx.theme().foreground,
+                    LogLevel::Log | LogLevel::Info => p.text(),
                 };
                 col = col.child(
                     div()

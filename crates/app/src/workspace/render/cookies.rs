@@ -3,18 +3,18 @@
 
 use crate::format::expires_label;
 use crate::sidebar::MainView;
-use crate::ui::{c, mono};
+use crate::theme::Palette;
+use crate::ui::mono;
 use crate::workspace::Workspace;
 use at_history::now_ms;
 use gpui::prelude::*;
 use gpui::{div, px, Context};
 use gpui_component::button::Button;
-use gpui_component::ActiveTheme as _;
 
 impl Workspace {
     pub(crate) fn render_cookies(&self, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let (muted, border) = (theme.muted_foreground, theme.border);
+        let p = Palette::of(cx);
+        let (muted, border) = (p.text_muted(), p.border_variant());
         let cookies = self.cookies.list();
         let now = now_ms() / 1000;
         let header = div()
@@ -161,7 +161,7 @@ impl Workspace {
             .children(
                 self.cookie_note
                     .clone()
-                    .map(|n| div().px_2().text_color(c(0xf38ba8)).child(n)),
+                    .map(|n| div().px_2().text_color(p.status_error()).child(n)),
             )
             .child(list)
     }

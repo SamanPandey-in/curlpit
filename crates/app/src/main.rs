@@ -3,8 +3,9 @@
 //!
 //! The window and its state live in `workspace`; this file only starts the runtime,
 //! binds the keys and opens the window. Each module below owns one area: `editor`,
-//! `response` and `tree` the two halves of a request tab, `format` and `ui` the shared
-//! pure helpers, `script`, `runner` and `sidebar` the state of the features named.
+//! `response` and `tree` the two halves of a request tab, `theme` the palette every
+//! view paints from, `format` and `ui` the shared pure helpers, `script`, `runner`
+//! and `sidebar` the state of the features named.
 
 mod actions;
 mod editor;
@@ -14,6 +15,7 @@ mod response;
 mod runner;
 mod script;
 mod sidebar;
+mod theme;
 mod tree;
 mod ui;
 mod workspace;

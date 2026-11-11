@@ -4,19 +4,19 @@
 use crate::format::human;
 use crate::runner::RunResult;
 use crate::sidebar::MainView;
-use crate::ui::{c, seg_btn_ix, status_color};
+use crate::theme::Palette;
+use crate::ui::seg_btn_ix;
 use crate::workspace::Workspace;
 use gpui::prelude::*;
 use gpui::{div, px, ClipboardItem, Context};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::Input;
-use gpui_component::ActiveTheme as _;
 
 impl Workspace {
     pub(crate) fn render_runner(&self, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let (muted, border) = (theme.muted_foreground, theme.border);
-        let (green, red) = (c(0xa6e3a1), c(0xf38ba8));
+        let p = Palette::of(cx);
+        let (muted, border) = (p.text_muted(), p.border_variant());
+        let (green, red) = (p.success_text(), p.status_error());
         let r = &self.runner;
         let running = r.cancel.is_some();
         let header = div()
@@ -59,6 +59,7 @@ impl Workspace {
                         "Stop on first failure: off"
                     },
                     r.stop_on_fail,
+                    cx,
                 )
                 .on_click(cx.listener(|this, _ev, _window, cx| {
                     this.runner.stop_on_fail = !this.runner.stop_on_fail;
@@ -132,7 +133,7 @@ impl Workspace {
                     size,
                 } => (
                     format!("{code} {text} · {ms} ms · {}", human(*size)),
-                    status_color(*code),
+                    p.status_class(*code),
                 ),
                 RunResult::Failed(e) => (e.clone(), red),
             };
@@ -215,7 +216,7 @@ impl Workspace {
             .children(
                 r.notes
                     .iter()
-                    .map(|n| div().px_2().text_color(c(0xf9e2af)).child(n.clone())),
+                    .map(|n| div().px_2().text_color(p.warning_text()).child(n.clone())),
             )
             .child(div().px_2().text_color(muted).child(progress))
             .child(list)

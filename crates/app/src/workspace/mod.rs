@@ -95,6 +95,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Everything paints from the One palette (`theme`), and the appearance follows the
+        // system both now and whenever the user flips it (FR-SET-01).
+        crate::theme::sync(window, cx);
+        let appearance = window.observe_window_appearance(|window, cx| {
+            crate::theme::sync(window, cx);
+            window.refresh();
+        });
         let env_name = cx.new(|cx| InputState::new(window, cx));
         let (store, store_err) = match Store::open_default() {
             Ok(s) => (Some(s), None),
@@ -201,7 +208,7 @@ impl Workspace {
                 notes: Vec::new(),
                 copied: false,
             },
-            _subs: vec![sub],
+            _subs: vec![sub, appearance],
         };
         me.refresh_sidebar();
         me.reload_envs();

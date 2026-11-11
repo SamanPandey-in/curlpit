@@ -17,7 +17,7 @@ impl Workspace {
         let mut kinds = div().flex().flex_row().flex_wrap().gap_1();
         for (i, kind) in AuthKind::EDITABLE.into_iter().enumerate() {
             kinds = kinds.child(
-                seg_btn_ix("auth-kind", i, kind.label(), tab.auth_kind == kind).on_click(
+                seg_btn_ix("auth-kind", i, kind.label(), tab.auth_kind == kind, cx).on_click(
                     cx.listener(move |this, _ev, _window, cx| {
                         this.tab_mut().auth_kind = kind;
                         cx.notify();
@@ -31,6 +31,7 @@ impl Workspace {
                 AuthKind::EDITABLE.len(),
                 AuthKind::Kept.label(),
                 tab.auth_kind == AuthKind::Kept,
+                cx,
             ));
         }
         let row = |label: &'static str, input: &Entity<InputState>| {
@@ -92,7 +93,7 @@ impl Workspace {
                         .flex_row()
                         .gap_1()
                         .child(
-                            seg_btn_ix("auth-in", 0, "Header", !tab.auth_in_query).on_click(
+                            seg_btn_ix("auth-in", 0, "Header", !tab.auth_in_query, cx).on_click(
                                 cx.listener(|this, _ev, _window, cx| {
                                     this.tab_mut().auth_in_query = false;
                                     cx.notify();
@@ -100,7 +101,7 @@ impl Workspace {
                             ),
                         )
                         .child(
-                            seg_btn_ix("auth-in", 1, "Query param", tab.auth_in_query).on_click(
+                            seg_btn_ix("auth-in", 1, "Query param", tab.auth_in_query, cx).on_click(
                                 cx.listener(|this, _ev, _window, cx| {
                                     this.tab_mut().auth_in_query = true;
                                     cx.notify();
