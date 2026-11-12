@@ -12,6 +12,9 @@ use at_core::{
 use at_store::{Node, Store, StoreError};
 use serde_json::{json, Map, Value};
 
+mod har;
+pub use har::import_har;
+
 pub const POSTMAN_SCHEMA_V21: &str =
     "https://schema.getpostman.com/json/collection/v2.1.0/collection.json";
 
