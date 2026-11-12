@@ -537,6 +537,7 @@ version = "0.0.1"
 dependencies = [
  "at-core",
  "at-store",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",

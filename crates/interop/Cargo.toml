@@ -10,6 +10,7 @@ name = "at_interop"
 [dependencies]
 at-core = { path = "../core" }
 at-store = { path = "../store" }
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
 

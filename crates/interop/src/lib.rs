@@ -14,6 +14,8 @@ use serde_json::{json, Map, Value};
 
 mod har;
 pub use har::import_har;
+mod native_json;
+pub use native_json::{export_json, import_json};
 
 pub const POSTMAN_SCHEMA_V21: &str =
     "https://schema.getpostman.com/json/collection/v2.1.0/collection.json";
@@ -33,13 +35,13 @@ pub enum InteropError {
 /// A collection tree, independent of where it lives.
 // Trees are small and short-lived (import/export only); boxing every request would add noise.
 #[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Item {
     Folder { name: String, items: Vec<Item> },
     Request(Request),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Collection {
     pub name: String,
     pub items: Vec<Item>,
