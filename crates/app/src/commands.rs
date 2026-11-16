@@ -60,6 +60,7 @@ pub(crate) fn static_commands() -> Vec<Command> {
         Command::new("Go to Environments", "Navigate", Go(MainView::Environments)),
         Command::new("Go to Runner", "Navigate", Go(MainView::Runner)),
         Command::new("Go to Cookies", "Navigate", Go(MainView::Cookies)),
+        Command::new("Go to Settings", "Navigate", Go(MainView::Settings)),
         Command::new("Show Collections", "Navigate", Side(SideView::Collections)),
         Command::new("Show History", "Navigate", Side(SideView::History)),
         Command::new("Import file\u{2026}", "Data", Import),

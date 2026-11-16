@@ -303,7 +303,7 @@ impl Workspace {
             MainView::Environments => self.close_envs(cx),
             // the runner keeps running in the background; its page can be reopened
             MainView::Runner | MainView::Cookies => self.main_view = MainView::Request,
-            MainView::Request => {}
+            MainView::Request | MainView::Settings => {}
         }
         self.main_view == MainView::Request
     }

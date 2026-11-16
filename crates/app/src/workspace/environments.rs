@@ -7,7 +7,6 @@ use crate::sidebar::{MainView, Scope};
 use crate::ui::Status;
 use crate::workspace::Workspace;
 use at_core::{to_map, EnvVar, Environment, Variables};
-use at_store::Settings;
 use gpui::prelude::*;
 use gpui::{App, Context, Window};
 use gpui_component::input::InputState;
@@ -48,13 +47,13 @@ impl Workspace {
         let Some(store) = &self.store else {
             return;
         };
-        let settings = Settings {
-            active_environment: self
-                .active_env
-                .and_then(|i| self.envs.get(i))
-                .map(|(e, _)| e.name.clone()),
-            ..Default::default()
-        };
+        // Load-modify-save so the Settings-screen fields (timeout, TLS, history cap,
+        // proxy) survive; only the active environment changes here.
+        let mut settings = store.load_settings();
+        settings.active_environment = self
+            .active_env
+            .and_then(|i| self.envs.get(i))
+            .map(|(e, _)| e.name.clone());
         if let Err(e) = store.save_settings(&settings) {
             self.status = Status::Error(e.to_string());
         }

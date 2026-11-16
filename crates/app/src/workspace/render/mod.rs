@@ -13,6 +13,7 @@ mod palette;
 mod runner;
 mod scripts;
 mod settings;
+mod settings_page;
 mod tree;
 
 use crate::actions::{
@@ -193,6 +194,11 @@ impl Render for Workspace {
                 Button::new("cookies-open")
                     .label("Cookies")
                     .on_click(cx.listener(|this, _ev, _window, cx| this.open_cookies(cx))),
+            )
+            .child(
+                Button::new("settings-open")
+                    .label("Settings")
+                    .on_click(cx.listener(|this, _ev, window, cx| this.open_settings(window, cx))),
             );
 
         // ---- request editor: tabs + panel ----
@@ -957,6 +963,7 @@ impl Render for Workspace {
                 MainView::Environments => self.render_env_page(cx).into_any_element(),
                 MainView::Runner => self.render_runner(cx).into_any_element(),
                 MainView::Cookies => self.render_cookies(cx).into_any_element(),
+                MainView::Settings => self.render_settings_page(cx).into_any_element(),
                 MainView::Request => main_col.into_any_element(),
             })
             .when(self.palette.is_some(), |d| d.child(self.render_palette(cx)))

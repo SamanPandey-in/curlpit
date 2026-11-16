@@ -142,6 +142,7 @@ impl Workspace {
             CommandKind::Import => self.on_import(window, cx),
             CommandKind::ExportPostman => self.on_export_collection(window, cx),
             CommandKind::ExportJson => self.on_export_collection_json(window, cx),
+            CommandKind::Go(MainView::Settings) => self.open_settings(window, cx),
             CommandKind::Go(view) => {
                 self.main_view = view;
                 cx.notify();

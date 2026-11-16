@@ -1,4 +1,4 @@
-//! HTTP engine: native client (no CORS, no proxy route), cancellation, timeouts,
+//! HTTP engine: native client (no CORS), cancellation, timeouts,
 //! structured errors, streaming with disk spill for large bodies (FR-ENG-*).
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -65,6 +65,8 @@ pub struct EngineConfig {
     /// Cookies set by responses are kept here and sent back with matching requests
     /// (including across redirects). `None` = no cookie handling.
     pub cookies: Option<Arc<CookieJar>>,
+    /// Outbound proxy URL applied to every request; empty = direct connection.
+    pub proxy: String,
 }
 
 impl Default for EngineConfig {
@@ -73,6 +75,7 @@ impl Default for EngineConfig {
             spill_threshold: 10 * 1024 * 1024,
             spill_dir: std::env::temp_dir().join("api-tester-spill"),
             cookies: None,
+            proxy: String::new(),
         }
     }
 }
@@ -115,6 +118,12 @@ async fn run(
     if let Some(jar) = &cfg.cookies {
         // a Cookie header set on the request itself is left alone; the jar adds nothing then
         cb = cb.cookie_provider(jar.clone());
+    }
+    if !cfg.proxy.is_empty() {
+        cb = cb.proxy(
+            reqwest::Proxy::all(&cfg.proxy)
+                .map_err(|e| HttpError::InvalidRequest(e.to_string()))?,
+        );
     }
     let client = cb.build().map_err(|e| HttpError::Other(e.to_string()))?;
 

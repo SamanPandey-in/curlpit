@@ -87,6 +87,7 @@ impl Workspace {
             .map(|(e, _)| e.name.clone());
         let (tx, rx) = async_channel::unbounded();
         let cookies = self.cookies.clone();
+        let proxy = self.settings.proxy.clone();
         // Requests run one after another; variables set by scripts flow into the next one.
         self.rt.spawn(async move {
             let mut vars = vars;
@@ -131,6 +132,7 @@ impl Workspace {
                                 token.child_token(),
                                 None,
                                 cookies.clone(),
+                                proxy.clone(),
                             )
                             .await;
                             let row = RunRow::from_outcome(
