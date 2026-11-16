@@ -7,7 +7,8 @@ use crate::sidebar::{ItemKind, MainView, Scope, SideView};
 use crate::ui::Status;
 use crate::workspace::{merge_vars, Workspace};
 use at_interop::{
-    export_collection, export_environment, import_any, read_collection, write_collection, Imported,
+    export_collection, export_environment, export_json, import_any, read_collection,
+    write_collection, Imported,
 };
 use at_store::slug;
 use gpui::{Context, PathPromptOptions, Window};
@@ -185,6 +186,40 @@ impl Workspace {
             text,
             file,
             format!("Exported collection \"{name}\""),
+            warnings,
+            window,
+            cx,
+        );
+    }
+
+    /// Export the selected collection as our native JSON (FR-IE-06).
+    pub(crate) fn on_export_collection_json(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((name, dir)) = self.selected_collection() else {
+            self.notice(Status::Error(
+                "Click a collection in the sidebar (or open one of its requests) to choose what to export"
+                    .into(),
+            ));
+            cx.notify();
+            return;
+        };
+        let (col, warnings) = match read_collection(&name, &dir) {
+            Ok(x) => x,
+            Err(e) => {
+                self.notice(Status::Error(e.to_string()));
+                cx.notify();
+                return;
+            }
+        };
+        let text = export_json(&col);
+        let file = format!("{}.json", slug(&name));
+        self.save_export(
+            text,
+            file,
+            format!("Exported collection \"{name}\" as JSON"),
             warnings,
             window,
             cx,

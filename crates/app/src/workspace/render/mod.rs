@@ -9,12 +9,16 @@ mod code;
 mod cookies;
 mod env_page;
 mod kv;
+mod palette;
 mod runner;
 mod scripts;
 mod settings;
 mod tree;
 
-use crate::actions::{CloseTab, FindInResponse, NewTab, ReopenTab, SaveRequest, SendRequest};
+use crate::actions::{
+    CloseTab, FindInResponse, NewTab, PaletteDismiss, PaletteNext, PalettePrev, ReopenTab,
+    SaveRequest, SendRequest, ToggleCommandPalette,
+};
 use crate::editor::{next_method, AuthKind, ReqTab, Which};
 use crate::format::{body_label, human};
 use crate::response::{row_spans, ResTab, Span, FIND_MAX};
@@ -912,6 +916,7 @@ impl Render for Workspace {
 
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_row()
             .bg(bg)
@@ -941,6 +946,12 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &SaveRequest, window, cx| this.on_save(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
+                this.toggle_palette(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PaletteNext, _window, cx| this.palette_move(1, cx)))
+            .on_action(cx.listener(|this, _: &PalettePrev, _window, cx| this.palette_move(-1, cx)))
+            .on_action(cx.listener(|this, _: &PaletteDismiss, _window, cx| this.close_palette(cx)))
             .child(sidebar)
             .child(match self.main_view {
                 MainView::Environments => self.render_env_page(cx).into_any_element(),
@@ -948,5 +959,6 @@ impl Render for Workspace {
                 MainView::Cookies => self.render_cookies(cx).into_any_element(),
                 MainView::Request => main_col.into_any_element(),
             })
+            .when(self.palette.is_some(), |d| d.child(self.render_palette(cx)))
     }
 }

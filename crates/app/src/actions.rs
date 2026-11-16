@@ -12,6 +12,10 @@ actions!(
         NewTab,
         CloseTab,
         ReopenTab,
-        FindInResponse
+        FindInResponse,
+        ToggleCommandPalette,
+        PaletteNext,
+        PalettePrev,
+        PaletteDismiss
     ]
 );

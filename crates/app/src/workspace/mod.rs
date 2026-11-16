@@ -11,6 +11,7 @@ mod environments;
 mod find;
 mod history;
 mod interop;
+mod palette;
 mod render;
 mod runner;
 mod send;
@@ -66,6 +67,8 @@ pub(crate) struct Workspace {
     hist_search: Entity<InputState>,
     /// Why history is unavailable or the last history operation failed.
     hist_error: Option<String>,
+    palette_query: Entity<InputState>,
+    palette: Option<palette::PaletteState>,
     confirm_clear: bool,
     /// Environment export includes secret values (off by default, FR-ENV-04).
     export_secrets: bool,
@@ -131,6 +134,8 @@ impl Workspace {
         };
         let hist_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search URL or name"));
+        let palette_query =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Type a command\u{2026}"));
         let sub = cx.subscribe_in(
             &hist_search,
             window,
@@ -139,6 +144,15 @@ impl Workspace {
                     this.refresh_history(cx);
                     cx.notify();
                 }
+            },
+        );
+        let palette_sub = cx.subscribe_in(
+            &palette_query,
+            window,
+            |this, _state, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => this.palette_filter(cx),
+                InputEvent::PressEnter { .. } => this.palette_confirm(window, cx),
+                _ => {}
             },
         );
         let (session, session_note, session_enabled) = match &store {
@@ -184,6 +198,8 @@ impl Workspace {
             hist_items: Vec::new(),
             hist_search,
             hist_error,
+            palette_query,
+            palette: None,
             confirm_clear: false,
             export_secrets: false,
             code_lang: Lang::Curl,
@@ -208,7 +224,7 @@ impl Workspace {
                 notes: Vec::new(),
                 copied: false,
             },
-            _subs: vec![sub, appearance],
+            _subs: vec![sub, appearance, palette_sub],
         };
         me.refresh_sidebar();
         me.reload_envs();

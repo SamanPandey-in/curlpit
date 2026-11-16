@@ -8,6 +8,7 @@
 //! and `sidebar` the state of the features named.
 
 mod actions;
+mod commands;
 mod editor;
 mod format;
 mod request_tab;
@@ -20,7 +21,10 @@ mod tree;
 mod ui;
 mod workspace;
 
-use crate::actions::{CloseTab, FindInResponse, NewTab, ReopenTab, SaveRequest, SendRequest};
+use crate::actions::{
+    CloseTab, FindInResponse, NewTab, PaletteDismiss, PaletteNext, PalettePrev, ReopenTab,
+    SaveRequest, SendRequest, ToggleCommandPalette,
+};
 use crate::workspace::Workspace;
 use gpui::prelude::*;
 use gpui::{px, size, App, Application, Bounds, KeyBinding, WindowBounds, WindowOptions};
@@ -55,6 +59,10 @@ fn main() {
             "ctrl-shift-t",
             "ctrl-f",
         );
+        #[cfg(target_os = "macos")]
+        let (palette_key, palette_key2) = ("cmd-k", "cmd-shift-p");
+        #[cfg(not(target_os = "macos"))]
+        let (palette_key, palette_key2) = ("ctrl-k", "ctrl-shift-p");
         cx.bind_keys([
             KeyBinding::new(send_key, SendRequest, None),
             KeyBinding::new(save_key, SaveRequest, None),
@@ -62,6 +70,11 @@ fn main() {
             KeyBinding::new(close_key, CloseTab, None),
             KeyBinding::new(reopen_key, ReopenTab, None),
             KeyBinding::new(find_key, FindInResponse, None),
+            KeyBinding::new(palette_key, ToggleCommandPalette, None),
+            KeyBinding::new(palette_key2, ToggleCommandPalette, None),
+            KeyBinding::new("up", PalettePrev, Some("Palette")),
+            KeyBinding::new("down", PaletteNext, Some("Palette")),
+            KeyBinding::new("escape", PaletteDismiss, Some("Palette")),
         ]);
         let bounds = Bounds::centered(None, size(px(1100.), px(760.)), cx);
         cx.open_window(
