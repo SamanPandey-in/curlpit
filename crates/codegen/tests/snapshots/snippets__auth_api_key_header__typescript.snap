@@ -1,0 +1,17 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+const url = "https://api.test/me";
+const headers: Record<string, string> = {
+  "X-Api-Key": "k'ey \"42\"",
+};
+
+const options: RequestInit = {
+  method: "GET",
+  headers,
+};
+
+const res: Response = await fetch(url, options);
+console.log(res.status);
+console.log(await res.text());

@@ -1,0 +1,10 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+const response = await fetch("https://api.test/me?v=1&api_key=k%20ey%2642", {
+  method: "GET",
+});
+
+console.log(response.status);
+console.log(await response.text());

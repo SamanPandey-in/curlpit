@@ -1,0 +1,19 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+const url = "https://api.test/form";
+const headers: Record<string, string> = {
+  "Content-Type": "application/x-www-form-urlencoded",
+};
+const body: string = "user=o%27brien&note=a%20%22quoted%22%20%26%20%24igned%20value";
+
+const options: RequestInit = {
+  method: "POST",
+  headers,
+  body,
+};
+
+const res: Response = await fetch(url, options);
+console.log(res.status);
+console.log(await res.text());

@@ -1,0 +1,24 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+<?php
+
+$ch = curl_init();
+curl_setopt_array($ch, [
+    CURLOPT_URL => "https://api.test/headers",
+    CURLOPT_CUSTOMREQUEST => "GET",
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => [
+        "X-Quote: he said \"hi\" and it's 'fine'",
+        "X-Dollar: cost \$5 {\$x} \${y} `tick`",
+        "X-Backslash: C:\\path\\to\\thing",
+    ],
+]);
+
+$response = curl_exec($ch);
+$status = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+curl_close($ch);
+
+echo $status, "\n";
+echo $response, "\n";

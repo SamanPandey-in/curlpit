@@ -1,0 +1,14 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+import requests
+
+url = "https://api.test/me"
+headers = {
+    "Authorization": "JWT eyJhbGciOiJIUzI1NiJ9.e30.sig",
+}
+
+response = requests.request("GET", url, headers=headers)
+print(response.status_code)
+print(response.text)

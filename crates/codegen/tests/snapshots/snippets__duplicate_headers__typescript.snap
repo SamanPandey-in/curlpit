@@ -1,0 +1,21 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+const url = "https://api.test/dupes";
+const headers: [string, string][] = [
+  ["Accept", "application/json"],
+  ["Accept", "text/plain; q=0.5"],
+  ["X-Sig", "first"],
+  ["X-Sig", "second"],
+  ["X-Ts", "1699999999"],
+];
+
+const options: RequestInit = {
+  method: "GET",
+  headers,
+};
+
+const res: Response = await fetch(url, options);
+console.log(res.status);
+console.log(await res.text());

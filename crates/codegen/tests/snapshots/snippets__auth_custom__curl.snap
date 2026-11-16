@@ -1,0 +1,7 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+curl 'https://api.test/me' \
+  -H 'X-Sig: abc'\''def' \
+  -H 'X-Ts: 1699999999'

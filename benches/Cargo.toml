@@ -1,0 +1,54 @@
+[package]
+name = "at-benches"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+# Every target is declared below; `benches/support.rs` is a shared module, not a target.
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[dev-dependencies]
+at-core = { path = "../crates/core" }
+# Lean feature set: `cargo_bench_support` is all that is needed to run under `cargo bench` and
+# print numbers. The default `plotters`/`rayon` features only matter with `html_reports`, which we
+# do not use, and criterion is already the slowest thing in this workspace to compile (D21: that is
+# why this package is a workspace member but NOT a default member).
+criterion = { version = "0.5.1", default-features = false, features = [
+    "cargo_bench_support",
+] }
+
+# `test = false`: these are harness-less criterion binaries, `cargo test` must not run them.
+[[bench]]
+name = "search"
+path = "benches/search.rs"
+harness = false
+test = false
+
+[[bench]]
+name = "index"
+path = "benches/index.rs"
+harness = false
+test = false
+
+[[bench]]
+name = "pretty"
+path = "benches/pretty.rs"
+harness = false
+test = false
+
+[[bench]]
+name = "request_build"
+path = "benches/request_build.rs"
+harness = false
+test = false
+
+# The budget gate is a normal (ignored) libtest target, not a benchmark.
+# `bench = false` keeps it out of `cargo bench`.
+[[test]]
+name = "budget_gate"
+path = "benches/budget_gate.rs"
+bench = false

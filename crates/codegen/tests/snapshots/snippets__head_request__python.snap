@@ -1,0 +1,14 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+import requests
+
+url = "https://api.test/resource"
+headers = {
+    "If-None-Match": "\"etag-1\"",
+}
+
+response = requests.request("HEAD", url, headers=headers)
+print(response.status_code)
+print(response.text)

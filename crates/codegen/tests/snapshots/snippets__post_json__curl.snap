@@ -1,0 +1,11 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+curl -X POST 'https://api.test/users' \
+  -H 'Content-Type: application/json' \
+  --data-raw '{
+  "name": "Ada",
+  "tags": [1, 2, 3],
+  "ok": true
+}'

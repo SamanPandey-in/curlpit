@@ -1,0 +1,11 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+curl -X POST 'https://api.test/tricky' \
+  -H 'X-Tricky: value	with	tabs' \
+  -H 'Content-Type: text/plain' \
+  --data-raw 'single '\'' double " backtick ` dollar $ interp {$var} brace ${var}
+placeholder {{notavar}} backslash \ not-an-escape \n \x41 \u{41}
+tab	here	two	verticalformescape[0m
+sohdeldone'

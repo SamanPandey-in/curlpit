@@ -1,0 +1,10 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+curl 'https://api.test/dupes' \
+  -H 'Accept: application/json' \
+  -H 'Accept: text/plain; q=0.5' \
+  -H 'X-Sig: first' \
+  -H 'X-Sig: second' \
+  -H 'X-Ts: 1699999999'

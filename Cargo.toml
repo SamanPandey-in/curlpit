@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/http", "crates/demo", "crates/store", "crates/history", "crates/interop", "crates/codegen", "crates/script", "crates/app"]
+members = ["crates/core", "crates/http", "crates/demo", "crates/store", "crates/history", "crates/interop", "crates/codegen", "crates/script", "crates/app", "benches"]
 # CI and plain `cargo test` skip the GUI crate (slow to build); build it with `-p at-app`.
 default-members = ["crates/core", "crates/http", "crates/demo", "crates/store", "crates/history", "crates/interop", "crates/codegen", "crates/script"]
 

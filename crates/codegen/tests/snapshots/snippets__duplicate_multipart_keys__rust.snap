@@ -1,0 +1,20 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+// Cargo.toml: reqwest = { version = "0.12", features = ["blocking", "multipart"] }
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let form = reqwest::blocking::multipart::Form::new()
+        .text("tag", "one")
+        .text("tag", "two")
+        .file("files[]", "/tmp/a.png")?
+        .file("files[]", "/tmp/b.png")?;
+    let response = reqwest::blocking::Client::new()
+        .request(reqwest::Method::POST, "https://up.test/batch")
+        .multipart(form)
+        .send()?;
+    println!("{}", response.status());
+    println!("{}", response.text()?);
+    Ok(())
+}

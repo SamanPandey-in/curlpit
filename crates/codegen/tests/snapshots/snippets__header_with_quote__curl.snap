@@ -1,0 +1,8 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+curl 'https://api.test/headers' \
+  -H 'X-Quote: he said "hi" and it'\''s '\''fine'\''' \
+  -H 'X-Dollar: cost $5 {$x} ${y} `tick`' \
+  -H 'X-Backslash: C:\path\to\thing'

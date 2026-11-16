@@ -1,0 +1,6 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+curl --head 'https://api.test/resource' \
+  -H 'If-None-Match: "etag-1"'

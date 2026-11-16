@@ -1,0 +1,17 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+import requests
+
+url = "https://up.test/u"
+data = {
+    "note": "it's \"fine\" $here",
+}
+files = {
+    "upload": open("/tmp/a b's \"file\".png", "rb"),
+}
+
+response = requests.request("PUT", url, data=data, files=files)
+print(response.status_code)
+print(response.text)

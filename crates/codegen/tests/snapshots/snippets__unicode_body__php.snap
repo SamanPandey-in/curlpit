@@ -1,0 +1,24 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+<?php
+
+$ch = curl_init();
+curl_setopt_array($ch, [
+    CURLOPT_URL => "https://api.test/unicode",
+    CURLOPT_CUSTOMREQUEST => "POST",
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => [
+        "X-Emoji: 😀",
+        "Content-Type: application/json",
+    ],
+    CURLOPT_POSTFIELDS => "{\"emoji\": \"😀🏳️‍🌈\", \"zwj\": \"👨‍👩‍👧\", \"math\": \"𝒳𝓇\", \"combining\": \"école\", \"cjk\": \"漢字\", \"rtl\": \"مرحبا\"}",
+]);
+
+$response = curl_exec($ch);
+$status = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+curl_close($ch);
+
+echo $status, "\n";
+echo $response, "\n";

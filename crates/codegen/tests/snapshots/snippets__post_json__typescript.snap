@@ -1,0 +1,19 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+const url = "https://api.test/users";
+const headers: Record<string, string> = {
+  "Content-Type": "application/json",
+};
+const body: string = "{\n  \"name\": \"Ada\",\n  \"tags\": [1, 2, 3],\n  \"ok\": true\n}";
+
+const options: RequestInit = {
+  method: "POST",
+  headers,
+  body,
+};
+
+const res: Response = await fetch(url, options);
+console.log(res.status);
+console.log(await res.text());

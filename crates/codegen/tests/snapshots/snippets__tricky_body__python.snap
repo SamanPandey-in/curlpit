@@ -1,0 +1,16 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+import requests
+
+url = "https://api.test/tricky"
+headers = {
+    "X-Tricky": "v\u0001alue\twith\ttabs",
+    "Content-Type": "text/plain",
+}
+data = "single ' double \" backtick ` dollar $ interp {$var} brace ${var}\nplaceholder {{notavar}} backslash \\ not-an-escape \\n \\x41 \\u{41}\ntab\there\ttwo\tvertical\u000bform\fescape\u001b[0m\nsoh\u0001deldone"
+
+response = requests.request("POST", url, headers=headers, data=data.encode("utf-8"))
+print(response.status_code)
+print(response.text)

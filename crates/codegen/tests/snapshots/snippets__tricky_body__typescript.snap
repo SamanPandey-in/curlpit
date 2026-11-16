@@ -1,0 +1,20 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+const url = "https://api.test/tricky";
+const headers: Record<string, string> = {
+  "X-Tricky": "v\u0001alue\twith\ttabs",
+  "Content-Type": "text/plain",
+};
+const body: string = "single ' double \" backtick ` dollar $ interp {$var} brace ${var}\nplaceholder {{notavar}} backslash \\ not-an-escape \\n \\x41 \\u{41}\ntab\there\ttwo\tvertical\u000bform\fescape\u001b[0m\nsoh\u0001deldone";
+
+const options: RequestInit = {
+  method: "POST",
+  headers,
+  body,
+};
+
+const res: Response = await fetch(url, options);
+console.log(res.status);
+console.log(await res.text());

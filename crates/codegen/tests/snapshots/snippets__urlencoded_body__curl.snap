@@ -1,0 +1,7 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+curl -X POST 'https://api.test/form' \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  --data-raw 'user=o%27brien&note=a%20%22quoted%22%20%26%20%24igned%20value'

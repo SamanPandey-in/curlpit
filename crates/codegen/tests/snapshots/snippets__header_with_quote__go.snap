@@ -1,0 +1,30 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+package main
+
+import (
+	"fmt"
+	"io"
+	"net/http"
+)
+
+func main() {
+	req, err := http.NewRequest("GET", "https://api.test/headers", nil)
+	if err != nil {
+		panic(err)
+	}
+	req.Header.Add("X-Quote", "he said \"hi\" and it's 'fine'")
+	req.Header.Add("X-Dollar", "cost $5 {$x} ${y} `tick`")
+	req.Header.Add("X-Backslash", "C:\\path\\to\\thing")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	fmt.Println(resp.Status)
+	fmt.Println(string(out))
+}

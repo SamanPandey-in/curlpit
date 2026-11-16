@@ -1,0 +1,19 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+import requests
+
+url = "https://up.test/batch"
+data = [
+    ("tag", "one"),
+    ("tag", "two"),
+]
+files = [
+    ("files[]", open("/tmp/a.png", "rb")),
+    ("files[]", open("/tmp/b.png", "rb")),
+]
+
+response = requests.request("POST", url, data=data, files=files)
+print(response.status_code)
+print(response.text)

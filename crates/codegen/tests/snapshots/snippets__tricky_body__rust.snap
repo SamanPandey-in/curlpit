@@ -1,0 +1,17 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+// Cargo.toml: reqwest = { version = "0.12", features = ["blocking"] }
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let response = reqwest::blocking::Client::new()
+        .request(reqwest::Method::POST, "https://api.test/tricky")
+        .header("X-Tricky", "v\u{1}alue\twith\ttabs")
+        .header("Content-Type", "text/plain")
+        .body("single ' double \" backtick ` dollar $ interp {$var} brace ${var}\nplaceholder {{notavar}} backslash \\ not-an-escape \\n \\x41 \\u{41}\ntab\there\ttwo\tvertical\u{b}form\u{c}escape\u{1b}[0m\nsoh\u{1}del\u{7f}done")
+        .send()?;
+    println!("{}", response.status());
+    println!("{}", response.text()?);
+    Ok(())
+}

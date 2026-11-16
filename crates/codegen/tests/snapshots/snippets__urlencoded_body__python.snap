@@ -1,0 +1,15 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+import requests
+
+url = "https://api.test/form"
+headers = {
+    "Content-Type": "application/x-www-form-urlencoded",
+}
+data = "user=o%27brien&note=a%20%22quoted%22%20%26%20%24igned%20value"
+
+response = requests.request("POST", url, headers=headers, data=data.encode("utf-8"))
+print(response.status_code)
+print(response.text)

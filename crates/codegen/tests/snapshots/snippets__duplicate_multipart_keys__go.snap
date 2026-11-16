@@ -1,0 +1,62 @@
+---
+source: crates/codegen/tests/snippets.rs
+expression: "generate(b, lang)"
+---
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"os"
+	"path/filepath"
+)
+
+func main() {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	w.WriteField("tag", "one")
+	w.WriteField("tag", "two")
+	{
+		f, err := os.Open("/tmp/a.png")
+		if err != nil {
+			panic(err)
+		}
+		part, err := w.CreateFormFile("files[]", filepath.Base("/tmp/a.png"))
+		if err != nil {
+			panic(err)
+		}
+		io.Copy(part, f)
+		f.Close()
+	}
+	{
+		f, err := os.Open("/tmp/b.png")
+		if err != nil {
+			panic(err)
+		}
+		part, err := w.CreateFormFile("files[]", filepath.Base("/tmp/b.png"))
+		if err != nil {
+			panic(err)
+		}
+		io.Copy(part, f)
+		f.Close()
+	}
+	w.Close()
+
+	req, err := http.NewRequest("POST", "https://up.test/batch", &buf)
+	if err != nil {
+		panic(err)
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	fmt.Println(resp.Status)
+	fmt.Println(string(out))
+}

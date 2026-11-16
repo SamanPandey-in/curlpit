@@ -21,3 +21,6 @@ gpui-component = "0.5"
 tokio.workspace = true
 tokio-util.workspace = true
 async-channel = "2"
+# Only to build the syntax theme: gpui-component can construct one solely by
+# deserializing it (see theme.rs).
+serde_json.workspace = true
