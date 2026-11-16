@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::{Collection, Imported, InteropError};
 
 /// Marker stored in every exported file so the format can be recognised on import.
-const FORMAT_TAG: &str = "api-tester-collection";
+pub(crate) const FORMAT_TAG: &str = "api-tester-collection";
 /// Current wrapper schema version.
 const FORMAT_VERSION: u32 = 1;
 

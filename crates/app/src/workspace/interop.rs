@@ -7,8 +7,7 @@ use crate::sidebar::{ItemKind, MainView, Scope, SideView};
 use crate::ui::Status;
 use crate::workspace::{merge_vars, Workspace};
 use at_interop::{
-    export_collection, export_environment, import_postman, read_collection, write_collection,
-    Imported,
+    export_collection, export_environment, import_any, read_collection, write_collection, Imported,
 };
 use at_store::slug;
 use gpui::{Context, PathPromptOptions, Window};
@@ -61,7 +60,7 @@ impl Workspace {
         .detach();
     }
 
-    /// Import a Postman collection, environment or globals file (the kind is detected).
+    /// Import a Postman, HAR or native JSON file; the kind is detected from its contents.
     pub(crate) fn import_file(
         &mut self,
         path: &std::path::Path,
@@ -70,7 +69,7 @@ impl Workspace {
     ) {
         let imported = std::fs::read_to_string(path)
             .map_err(|e| e.to_string())
-            .and_then(|t| import_postman(&t).map_err(|e| e.to_string()));
+            .and_then(|t| import_any(&t).map_err(|e| e.to_string()));
         let imported = match imported {
             Ok(i) => i,
             Err(e) => {
