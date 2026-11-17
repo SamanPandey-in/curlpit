@@ -30,7 +30,9 @@ use crate::workspace::Workspace;
 use at_core::lines::{build_rows, CONT};
 use at_history::{ago, now_ms};
 use gpui::prelude::*;
-use gpui::{div, px, uniform_list, ClipboardItem, Context, Hsla, ScrollWheelEvent, Window};
+use gpui::{
+    div, px, uniform_list, ClipboardItem, Context, ExternalPaths, Hsla, ScrollWheelEvent, Window,
+};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::Input;
 use std::sync::Arc;
@@ -773,6 +775,9 @@ impl Render for Workspace {
                             cx.listener(|this, _ev, window, cx| this.on_import(window, cx)),
                         ),
                     )
+                    .child(Button::new("col-paste").label("Paste").on_click(
+                        cx.listener(|this, _ev, window, cx| this.import_from_clipboard(window, cx)),
+                    ))
                     .child(Button::new("col-export").label("Export…").on_click(
                         cx.listener(|this, _ev, window, cx| this.on_export_collection(window, cx)),
                     ))
@@ -958,6 +963,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &PaletteNext, _window, cx| this.palette_move(1, cx)))
             .on_action(cx.listener(|this, _: &PalettePrev, _window, cx| this.palette_move(-1, cx)))
             .on_action(cx.listener(|this, _: &PaletteDismiss, _window, cx| this.close_palette(cx)))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.import_dropped(paths.paths(), window, cx)
+            }))
             .child(sidebar)
             .child(match self.main_view {
                 MainView::Environments => self.render_env_page(cx).into_any_element(),

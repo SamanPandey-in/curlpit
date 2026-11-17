@@ -140,6 +140,7 @@ impl Workspace {
                 }
             }
             CommandKind::Import => self.on_import(window, cx),
+            CommandKind::ImportClipboard => self.import_from_clipboard(window, cx),
             CommandKind::ExportPostman => self.on_export_collection(window, cx),
             CommandKind::ExportJson => self.on_export_collection_json(window, cx),
             CommandKind::Go(MainView::Settings) => self.open_settings(window, cx),

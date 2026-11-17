@@ -68,16 +68,31 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let imported = std::fs::read_to_string(path)
-            .map_err(|e| e.to_string())
-            .and_then(|t| import_any(&t).map_err(|e| e.to_string()));
-        let imported = match imported {
-            Ok(i) => i,
+        match std::fs::read_to_string(path) {
+            Ok(text) => self.import_text(&text, &path.display().to_string(), window, cx),
             Err(e) => {
                 self.notice(Status::Error(format!(
                     "Could not import {}: {e}",
                     path.display()
                 )));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Import collection, environment or globals text from any source — a file, a drop or the
+    /// clipboard. The format is detected; malformed input is an error, never a crash (FR-IE-09).
+    pub(crate) fn import_text(
+        &mut self,
+        text: &str,
+        source: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let imported = match import_any(text) {
+            Ok(i) => i,
+            Err(e) => {
+                self.notice(Status::Error(format!("Could not import {source}: {e}")));
                 cx.notify();
                 return;
             }
@@ -160,6 +175,32 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    /// Import every file dropped onto the window (FR-IE-09 drag and drop).
+    pub(crate) fn import_dropped(
+        &mut self,
+        paths: &[std::path::PathBuf],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for path in paths {
+            self.import_file(path, window, cx);
+        }
+    }
+
+    /// Import the collection, environment or globals text on the clipboard (FR-IE-09 paste).
+    pub(crate) fn import_from_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = cx
+            .read_from_clipboard()
+            .and_then(|c| c.text())
+            .unwrap_or_default();
+        if text.trim().is_empty() {
+            self.notice(Status::Error("The clipboard is empty".into()));
+            cx.notify();
+            return;
+        }
+        self.import_text(&text, "clipboard", window, cx);
     }
 
     pub(crate) fn on_export_collection(&mut self, window: &mut Window, cx: &mut Context<Self>) {

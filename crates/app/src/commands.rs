@@ -18,6 +18,7 @@ pub(crate) enum CommandKind {
     ReopenTab,
     Find,
     Import,
+    ImportClipboard,
     ExportPostman,
     ExportJson,
     Go(MainView),
@@ -64,6 +65,7 @@ pub(crate) fn static_commands() -> Vec<Command> {
         Command::new("Show Collections", "Navigate", Side(SideView::Collections)),
         Command::new("Show History", "Navigate", Side(SideView::History)),
         Command::new("Import file\u{2026}", "Data", Import),
+        Command::new("Import from clipboard", "Data", ImportClipboard),
         Command::new(
             "Export collection as Postman\u{2026}",
             "Data",
