@@ -1,13 +1,20 @@
-//! `{{name}}` substitution with scope precedence (FR-ENV-02, FR-ENV-03).
+//! `{{name}}` substitution with scope precedence (FR-ENV-02, FR-ENV-03), plus the
+//! `{{$dynamic}}` fallback (see [`crate::dynamic`]).
+use crate::dynamic::{dynamic_value, is_dynamic};
 use std::collections::HashMap;
 
-/// Precedence, lowest to highest: global < collection < environment < runtime.
+/// Precedence, lowest to highest: global < collection < environment < runtime. Names that
+/// start with `$` and match none of these fall back to a fresh dynamic value.
 #[derive(Clone, Debug, Default)]
 pub struct Variables {
     pub global: HashMap<String, String>,
     pub collection: HashMap<String, String>,
     pub environment: HashMap<String, String>,
     pub runtime: HashMap<String, String>,
+    /// Leave known `{{$dynamic}}` names literal instead of generating values, and don't report
+    /// them as unresolved. Code snippets set this: a snippet is re-rendered often, and a
+    /// placeholder is the honest rendering of "a fresh value on every send".
+    pub keep_dynamic: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,13 +44,19 @@ impl Variables {
             match after.find("}}") {
                 Some(end) => {
                     let name = after[..end].trim();
-                    match self.get(name) {
-                        Some(v) => out.push_str(v),
-                        None => {
-                            out.push_str(&rest[start..start + 2 + end + 2]);
-                            if !name.is_empty() && !unresolved.iter().any(|u| u == name) {
-                                unresolved.push(name.to_string());
-                            }
+                    let literal = &rest[start..start + 2 + end + 2];
+                    // User variables first; `$` names only as a fallback, fresh per occurrence.
+                    if let Some(v) = self.get(name) {
+                        out.push_str(v);
+                    } else if is_dynamic(name) {
+                        match dynamic_value(name).filter(|_| !self.keep_dynamic) {
+                            Some(v) => out.push_str(&v),
+                            None => out.push_str(literal),
+                        }
+                    } else {
+                        out.push_str(literal);
+                        if !name.is_empty() && !unresolved.iter().any(|u| u == name) {
+                            unresolved.push(name.to_string());
                         }
                     }
                     rest = &after[end + 2..];
@@ -105,5 +118,99 @@ mod tests {
     #[test]
     fn no_vars_is_identity_and_unicode_safe() {
         assert_eq!(vars().resolve("héllo wörld ✓").text, "héllo wörld ✓");
+    }
+
+    const UUID: &str = r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+
+    #[test]
+    fn dynamic_names_resolve_in_place() {
+        let r = vars().resolve("{{host}}/u/{{$uuid}}?t={{ $timestamp }}&n={{$randomInt}}");
+        assert!(r.unresolved.is_empty(), "{:?}", r.unresolved);
+        let re =
+            regex::Regex::new(&format!(r"^env\.test/u/{UUID}\?t=\d{{10}}&n=\d{{1,4}}$")).unwrap();
+        assert!(re.is_match(&r.text), "{}", r.text);
+    }
+
+    #[test]
+    fn each_occurrence_gets_its_own_value() {
+        let r = Variables::default().resolve("{{$uuid}} {{$uuid}} {{$guid}}");
+        let ids: Vec<&str> = r.text.split(' ').collect();
+        assert_eq!(ids.len(), 3);
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[1], ids[2]);
+        assert_ne!(ids[0], ids[2]);
+    }
+
+    #[test]
+    fn user_variable_shadows_dynamic_name() {
+        let mut v = vars();
+        v.global.insert("$uuid".into(), "fixed-global".into());
+        assert_eq!(v.resolve("{{$uuid}}").text, "fixed-global");
+        v.environment.insert("$uuid".into(), "fixed-env".into());
+        assert_eq!(v.resolve("{{$uuid}}").text, "fixed-env");
+    }
+
+    #[test]
+    fn unknown_dollar_name_stays_unresolved() {
+        let r = vars().resolve("a {{$foo}} b {{$foo}} {{$uuid}}");
+        assert!(r.text.starts_with("a {{$foo}} b {{$foo}} "), "{}", r.text);
+        assert!(!r.text.contains("{{$uuid}}"), "{}", r.text);
+        assert_eq!(r.unresolved, vec!["$foo".to_string()]);
+    }
+
+    #[test]
+    fn keep_dynamic_leaves_placeholders_without_reporting_them() {
+        let mut v = Variables {
+            keep_dynamic: true,
+            ..vars()
+        };
+        let r = v.resolve("{{host}}/{{$uuid}}/{{ $timestamp }}/{{$foo}}");
+        assert_eq!(r.text, "env.test/{{$uuid}}/{{ $timestamp }}/{{$foo}}");
+        assert_eq!(r.unresolved, vec!["$foo".to_string()]);
+        // a user value still wins over the placeholder
+        v.runtime.insert("$uuid".into(), "mine".into());
+        assert_eq!(v.resolve("{{$uuid}}").text, "mine");
+    }
+
+    #[test]
+    fn dynamic_values_reach_every_part_of_a_built_request() {
+        use crate::models::{Auth, Body, KeyValue, Request};
+        let kv = KeyValue::new;
+        let req = Request {
+            url: "https://x.test/{{$randomInt}}".into(),
+            params: vec![kv("id", "{{$uuid}}")],
+            headers: vec![kv("X-Req", "{{$guid}}")],
+            auth: Auth::Bearer {
+                token: "{{$randomUUID}}".into(),
+            },
+            body: Body::Json {
+                raw: r#"{"at":"{{$isoTimestamp}}"}"#.into(),
+            },
+            ..Request::default()
+        };
+        let b = crate::build(&req, &Variables::default()).unwrap();
+        assert!(b.unresolved.is_empty(), "{:?}", b.unresolved);
+        assert!(
+            !b.url.contains("%7B%7B") && !b.url.contains("{{"),
+            "{}",
+            b.url
+        );
+        assert!(b.headers.iter().all(|(_, v)| !v.contains("{{")));
+        let crate::BuiltBody::Bytes(body) = b.body else {
+            panic!("expected bytes");
+        };
+        assert!(!String::from_utf8(body).unwrap().contains("{{"));
+        // code snippets keep the placeholders
+        let snippet_vars = Variables {
+            keep_dynamic: true,
+            ..Variables::default()
+        };
+        let t = crate::build_template(&req, &snippet_vars).unwrap();
+        assert!(
+            t.url.starts_with("https://x.test/{{$randomInt}}"),
+            "{}",
+            t.url
+        );
+        assert!(t.unresolved.is_empty());
     }
 }

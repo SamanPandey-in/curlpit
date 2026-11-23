@@ -332,8 +332,10 @@ impl RequestTab {
             BodyMode::FormData => Body::FormData {
                 fields: collect_form(&self.multipart, cx),
             },
+            BodyMode::GraphQl => self.base.body.clone(),
         };
         Request {
+            uid: self.base.uid.clone(),
             id: self.base.id.clone(),
             name: Self::text(&self.name, cx),
             method: self.method,
@@ -360,6 +362,22 @@ impl RequestTab {
         match (&self.auth_kind, &self.base.auth) {
             (AuthKind::Kept, Auth::Jwt { .. }) => Some("JWT"),
             (AuthKind::Kept, Auth::Custom { .. }) => Some("custom auth headers"),
+            (AuthKind::Kept, Auth::Inherit) => Some("inherited auth"),
+            (AuthKind::Kept, a @ (Auth::OAuth2(_) | Auth::Digest { .. })) => a.unsupported(),
+            _ => None,
+        }
+    }
+
+    /// A note for kept auth that isn't sent as-is: types that can't be sent yet, and
+    /// inheritance (not resolved yet, so nothing is added).
+    pub(crate) fn kept_auth_note(&self) -> Option<&'static str> {
+        match (&self.auth_kind, &self.base.auth) {
+            (AuthKind::Kept, Auth::Inherit) => Some(
+                "Inheriting auth from the folder or collection isn't supported yet, so no auth is added for now.",
+            ),
+            (AuthKind::Kept, Auth::OAuth2(_) | Auth::Digest { .. }) => Some(
+                "Sending with this auth type isn't supported yet: Send reports an error until it is. Its settings are saved unchanged.",
+            ),
             _ => None,
         }
     }
@@ -407,6 +425,8 @@ impl RequestTab {
             Body::Text { raw } => (BodyMode::Raw, RawKind::Text, raw.clone()),
             Body::UrlEncoded { .. } => (BodyMode::UrlEncoded, RawKind::Json, String::new()),
             Body::FormData { .. } => (BodyMode::FormData, RawKind::Json, String::new()),
+            // no GraphQL editor yet: kept as loaded, the raw editor stays empty
+            Body::GraphQl { .. } => (BodyMode::GraphQl, RawKind::Json, String::new()),
         };
         self.body_mode = mode;
         self.raw_kind = kind;
@@ -468,7 +488,11 @@ impl RequestTab {
                 value.as_str(),
                 *location == ApiKeyLocation::Query,
             ),
-            Auth::Jwt { .. } | Auth::Custom { .. } => (AuthKind::Kept, "", "", "", "", "", false),
+            Auth::Jwt { .. }
+            | Auth::Custom { .. }
+            | Auth::Inherit
+            | Auth::OAuth2(_)
+            | Auth::Digest { .. } => (AuthKind::Kept, "", "", "", "", "", false),
         };
         self.auth_kind = kind;
         self.auth_in_query = in_query;

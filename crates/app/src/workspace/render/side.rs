@@ -157,7 +157,7 @@ impl Workspace {
             .child(
                 quiet_btn("col-import", "Import…".to_string(), cx)
                     .xsmall()
-                    .tooltip("Import a Postman or Insomnia collection")
+                    .tooltip("Import a Postman collection, HAR, environment or cURL")
                     .on_click(cx.listener(|this, _ev, window, cx| this.on_import(window, cx))),
             )
             .child(

@@ -28,6 +28,7 @@ fn vars() -> Variables {
 /// A representative request: params, headers, auth and a JSON body, all with variables in them.
 fn representative() -> Request {
     Request {
+        uid: String::new(),
         id: "req-create-order".into(),
         name: "Create order".into(),
         method: Method::Post,

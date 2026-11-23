@@ -23,6 +23,8 @@ pub(crate) enum BodyMode {
     Raw,
     UrlEncoded,
     FormData,
+    /// A GraphQL body from a file. No editor yet: shown read-only, sent and saved unchanged.
+    GraphQl,
 }
 
 /// Flavour of a raw body; decides the default Content-Type.

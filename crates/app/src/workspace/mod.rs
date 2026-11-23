@@ -125,6 +125,12 @@ impl Workspace {
             Ok(s) => (Some(s), None),
             Err(e) => (None, Some(e.to_string())),
         };
+        // First run on an empty data dir: seed the "Getting started" sample (G-22). Before
+        // anything else (history, session) writes into the data dir.
+        let store_err = match store.as_ref().map(Store::seed_sample_if_fresh) {
+            Some(Err(e)) => Some(format!("Sample collection not created: {e}")),
+            _ => store_err,
+        };
         let settings = store
             .as_ref()
             .map(|s| s.load_settings())

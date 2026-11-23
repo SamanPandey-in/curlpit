@@ -5,7 +5,7 @@ use crate::editor::{has_body, BodyMode, RawKind, Which};
 use crate::request_tab::RequestTab;
 use crate::ui::seg_btn_ix;
 use crate::workspace::Workspace;
-use at_core::{FormField, FormValue};
+use at_core::{Body, FormField, FormValue};
 use gpui::prelude::*;
 use gpui::{div, px, Context};
 use gpui_component::button::Button;
@@ -36,6 +36,22 @@ impl Workspace {
                 )),
             );
         }
+        // a GraphQL body from a file has no editor yet; offer it only while it can be kept
+        if let Body::GraphQl { .. } = tab.base.body {
+            modes = modes.child(
+                seg_btn_ix(
+                    "body-mode",
+                    4,
+                    "GraphQL",
+                    tab.body_mode == BodyMode::GraphQl,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _ev, _window, cx| {
+                    this.tab_mut().body_mode = BodyMode::GraphQl;
+                    cx.notify();
+                })),
+            );
+        }
         if tab.body_mode == BodyMode::Raw {
             modes = modes.child(div().w(px(12.)));
             for (i, kind) in RawKind::ALL.into_iter().enumerate() {
@@ -64,6 +80,31 @@ impl Workspace {
                 .into_any_element(),
             BodyMode::UrlEncoded => self.render_kv(tab, Which::Form, cx).into_any_element(),
             BodyMode::FormData => self.render_multipart(tab, cx).into_any_element(),
+            BodyMode::GraphQl => {
+                let (query, variables) = match &tab.base.body {
+                    Body::GraphQl { query, variables } => (query.as_str(), variables.as_str()),
+                    _ => ("", ""),
+                };
+                let lines = |s: &str| {
+                    s.lines()
+                        .map(|l| div().child(l.to_string()))
+                        .collect::<Vec<_>>()
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_color(muted).child(
+                        "GraphQL body from the file (read-only; a GraphQL editor isn't supported yet). \
+                         It is sent as JSON {\"query\", \"variables\"} and saved unchanged; pick another mode to replace it.",
+                    ))
+                    .children(lines(query))
+                    .when(!variables.trim().is_empty(), |d| {
+                        d.child(div().text_color(muted).child("Variables"))
+                            .children(lines(variables))
+                    })
+                    .into_any_element()
+            }
         };
         div()
             .p_2()

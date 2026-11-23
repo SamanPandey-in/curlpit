@@ -107,6 +107,7 @@ pub(crate) fn body_label(mode: BodyMode, kind: RawKind) -> String {
         BodyMode::Raw => format!("Body ({})", kind.label()),
         BodyMode::UrlEncoded => "Body (urlencoded)".into(),
         BodyMode::FormData => "Body (form-data)".into(),
+        BodyMode::GraphQl => "Body (GraphQL)".into(),
     }
 }
 

@@ -12,11 +12,21 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use at_core::{EnvVar, Environment, Request};
+use at_core::{CollectionMeta, EnvVar, Environment, FolderMeta, Request};
 use serde::{Deserialize, Serialize};
 
+mod sample;
+mod secrets;
+pub use sample::{sample_requests, SAMPLE_BASE_URL, SAMPLE_COLLECTION, SAMPLE_ENVIRONMENT};
+pub use secrets::{backup_path, ensure_gitignore, local_path, ENV_GITIGNORE};
+
 pub const SCHEMA_VERSION: u32 = 1;
-const COLLECTION_FILE: &str = "collection.toml";
+/// Collection settings ([`CollectionMeta`]) at a collection root.
+pub const COLLECTION_FILE: &str = "collection.toml";
+/// Folder settings ([`FolderMeta`]) inside a folder.
+pub const FOLDER_FILE: &str = "folder.toml";
+/// Lines the data directory's `.gitignore` gets once the globals hold a secret (G-14).
+pub const GLOBALS_GITIGNORE: &[&str] = &["globals.local.toml", "globals.toml.bak"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -115,6 +125,33 @@ pub struct Settings {
     /// Proxy URL to route requests through (empty string = no proxy).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub proxy: String,
+    /// PEM file of extra trusted root certificates, added to the built-in ones (G-17).
+    /// Empty = none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ca_bundle: String,
+    /// Lowest TLS version allowed: `"1.2"`, `"1.3"`, or empty for the library default.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub min_tls: String,
+    /// Client certificates, each presented to one host (G-17). Kept last: TOML writes
+    /// arrays of tables after the plain keys.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub client_certs: Vec<ClientCertSetting>,
+}
+
+/// One client certificate in [`Settings::client_certs`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientCertSetting {
+    /// Host it is presented to, matched exactly (no port, no wildcards).
+    #[serde(default)]
+    pub host: String,
+    /// The certificate file. The app supports PEM with the certificate and an unencrypted
+    /// key in one file.
+    #[serde(default)]
+    pub path: String,
+    /// Reserved for PKCS#12 files, which the current TLS backend cannot read; kept so a
+    /// load-modify-save never drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
 }
 
 fn current_schema() -> u32 {
@@ -142,6 +179,9 @@ impl Default for Settings {
             verify_tls: true,
             history_cap: 1000,
             proxy: String::new(),
+            ca_bundle: String::new(),
+            min_tls: String::new(),
+            client_certs: Vec::new(),
         }
     }
 }
@@ -191,12 +231,32 @@ pub struct EnvEntry {
     pub path: PathBuf,
 }
 
-#[derive(Serialize, Deserialize)]
-struct CollectionFile {
+/// `collection.toml` / `folder.toml` on disk: the meta fields at the top level, next to
+/// `schema_version` (older `collection.toml` files hold just `name` and `description`).
+#[derive(Serialize)]
+struct MetaFileRef<'a, T> {
     schema_version: u32,
-    name: String,
-    #[serde(default)]
-    description: String,
+    #[serde(flatten)]
+    meta: &'a T,
+}
+
+/// A fresh stable id for [`Request::uid`].
+pub fn new_uid() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// `collection.toml` and `folder.toml` are settings files, but a request named "Collection" or
+/// "Folder" was once saved under those names; such a file (one with a `[request]` table) is
+/// still a request.
+fn is_meta_file_name(name: &str) -> bool {
+    name == COLLECTION_FILE || name == FOLDER_FILE
+}
+
+fn holds_request(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
+        .is_some_and(|t| t.contains_key("request"))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -410,16 +470,13 @@ impl Store {
         };
         let dir = unique_path(&self.root, &slug(name), "", None);
         fs::create_dir_all(&dir).map_err(io(&dir))?;
-        let file = CollectionFile {
-            schema_version: SCHEMA_VERSION,
-            name: name.to_string(),
-            description: String::new(),
-        };
-        let text = toml::to_string_pretty(&file).map_err(|e| StoreError::Serialize {
-            path: dir.clone(),
-            msg: e.to_string(),
-        })?;
-        atomic_write(&dir.join(COLLECTION_FILE), &text)?;
+        Store::save_collection_meta(
+            &dir,
+            &CollectionMeta {
+                name: name.to_string(),
+                ..Default::default()
+            },
+        )?;
         Ok(CollectionTree {
             dir_name: dir
                 .file_name()
@@ -440,10 +497,11 @@ impl Store {
                 continue;
             }
             let dir = entry.path();
-            let name = fs::read_to_string(dir.join(COLLECTION_FILE))
+            // A collection whose settings can't be read still lists its requests.
+            let name = Store::load_collection_meta(&dir)
                 .ok()
-                .and_then(|t| toml::from_str::<CollectionFile>(&t).ok())
                 .map(|c| c.name)
+                .filter(|n| !n.trim().is_empty())
                 .unwrap_or_else(|| dir_name.clone());
             let children = Store::load_tree(&dir)?;
             out.push(CollectionTree {
@@ -473,7 +531,9 @@ impl Store {
                     path,
                     children,
                 });
-            } else if file_name.ends_with(".toml") && file_name != COLLECTION_FILE {
+            } else if file_name.ends_with(".toml")
+                && (!is_meta_file_name(&file_name) || holds_request(&path))
+            {
                 let stem = file_name.trim_end_matches(".toml").to_string();
                 match Store::load_request(&path) {
                     Ok(req) => {
@@ -519,12 +579,32 @@ impl Store {
     /// Save into `dir` (a collection or folder directory). The file name comes from the request name.
     /// `replace` is the file this request was opened from: it is overwritten in place, or removed
     /// if the new name maps to a different file.
+    ///
+    /// A request without a [`Request::uid`] keeps the uid of the `replace` file (so renames and
+    /// moves keep it even if the caller never saw it), or gets a fresh one.
     pub fn save_request(
         dir: &Path,
         req: &Request,
         replace: Option<&Path>,
     ) -> Result<PathBuf, StoreError> {
-        let target = unique_path(dir, &slug(&req.name), ".toml", replace);
+        let with_uid;
+        let req = if req.uid.is_empty() {
+            let uid = replace
+                .and_then(|p| Store::load_request(p).ok())
+                .map(|r| r.uid)
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(new_uid);
+            with_uid = Request { uid, ..req.clone() };
+            &with_uid
+        } else {
+            req
+        };
+        // `collection.toml` / `folder.toml` are settings files, not requests
+        let mut name = slug(&req.name);
+        if is_meta_file_name(&format!("{name}.toml")) {
+            name.push_str("-request");
+        }
+        let target = unique_path(dir, &name, ".toml", replace);
         let text = toml::to_string_pretty(&RequestFileRef {
             schema_version: SCHEMA_VERSION,
             request: req,
@@ -546,6 +626,77 @@ impl Store {
         fs::remove_file(path).map_err(io(path))
     }
 
+    /// Move a request file into another collection or folder directory, keeping its uid (one
+    /// is assigned if it had none). Returns the new path.
+    pub fn move_request(path: &Path, to_dir: &Path) -> Result<PathBuf, StoreError> {
+        let req = Store::load_request(path)?;
+        Store::save_request(to_dir, &req, Some(path))
+    }
+
+    // ---- collection and folder settings (G-03; stored, not applied yet) ----
+
+    /// Read a settings file: `None` if it doesn't exist (or is a request saved under that
+    /// name), an error if it is unreadable or from a newer version.
+    fn read_meta<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, StoreError> {
+        if !path.exists() || holds_request(path) {
+            return Ok(None);
+        }
+        let text = Store::read_versioned(path)?;
+        toml::from_str::<T>(&text)
+            .map(Some)
+            .map_err(|e| StoreError::Parse {
+                path: path.to_path_buf(),
+                msg: e.to_string(),
+            })
+    }
+
+    fn write_meta<T: Serialize>(path: &Path, meta: &T) -> Result<(), StoreError> {
+        if holds_request(path) {
+            return Err(StoreError::Serialize {
+                path: path.to_path_buf(),
+                msg: "a saved request has this file name; rename that request first".into(),
+            });
+        }
+        let text = toml::to_string_pretty(&MetaFileRef {
+            schema_version: SCHEMA_VERSION,
+            meta,
+        })
+        .map_err(|e| StoreError::Serialize {
+            path: path.to_path_buf(),
+            msg: e.to_string(),
+        })?;
+        atomic_write(path, &text)
+    }
+
+    /// The `collection.toml` of the collection at `dir`. A missing file gives defaults, with
+    /// the directory name as the display name.
+    pub fn load_collection_meta(dir: &Path) -> Result<CollectionMeta, StoreError> {
+        let mut meta =
+            Store::read_meta::<CollectionMeta>(&dir.join(COLLECTION_FILE))?.unwrap_or_default();
+        if meta.name.trim().is_empty() {
+            meta.name = dir
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+        }
+        Ok(meta)
+    }
+
+    /// Write `collection.toml` at the collection root `dir` (atomically).
+    pub fn save_collection_meta(dir: &Path, meta: &CollectionMeta) -> Result<(), StoreError> {
+        Store::write_meta(&dir.join(COLLECTION_FILE), meta)
+    }
+
+    /// The `folder.toml` of the folder at `dir`; defaults (inherit everything) if missing.
+    pub fn load_folder_meta(dir: &Path) -> Result<FolderMeta, StoreError> {
+        Ok(Store::read_meta(&dir.join(FOLDER_FILE))?.unwrap_or_default())
+    }
+
+    /// Write `folder.toml` in the folder `dir` (atomically).
+    pub fn save_folder_meta(dir: &Path, meta: &FolderMeta) -> Result<(), StoreError> {
+        Store::write_meta(&dir.join(FOLDER_FILE), meta)
+    }
+
     // ---- environments, globals, settings (FR-ENV-01/02, FR-PER-01) ----
 
     fn env_dir(&self) -> PathBuf {
@@ -560,7 +711,7 @@ impl Store {
         self.data_dir.join("settings.toml")
     }
 
-    fn read_versioned(path: &Path) -> Result<String, StoreError> {
+    pub(crate) fn read_versioned(path: &Path) -> Result<String, StoreError> {
         let text = fs::read_to_string(path).map_err(io(path))?;
         let v: Versioned = toml::from_str(&text).map_err(|e| StoreError::Parse {
             path: path.to_path_buf(),
@@ -587,7 +738,11 @@ impl Store {
         for entry in rd.flatten() {
             let file_name = entry.file_name().to_string_lossy().into_owned();
             let path = entry.path();
-            if is_hidden(&file_name) || !file_name.ends_with(".toml") || path.is_dir() {
+            if is_hidden(&file_name)
+                || !file_name.ends_with(".toml")
+                || secrets::is_companion(&file_name)
+                || path.is_dir()
+            {
                 continue;
             }
             let parsed = Store::read_versioned(&path).and_then(|text| {
@@ -596,11 +751,14 @@ impl Store {
                     msg: e.to_string(),
                 })
             });
-            if let Ok(f) = parsed {
+            // An unreadable local file skips the environment too, so a save can never
+            // replace secrets it could not read.
+            let local = secrets::read_local(&path);
+            if let (Ok(f), Ok(local)) = (parsed, local) {
                 out.push(EnvEntry {
                     env: Environment {
                         name: f.name,
-                        variables: f.variables,
+                        variables: secrets::merge(f.variables, local),
                     },
                     path,
                 });
@@ -610,8 +768,11 @@ impl Store {
         out
     }
 
-    /// Save an environment. `replace` is the file it was loaded from (overwritten in place, or
-    /// removed if the new name maps to a different file name).
+    /// Save an environment as its shareable `<slug>.toml` plus the private
+    /// `<slug>.local.toml` holding the secret values (G-14). `replace` is the file it was
+    /// loaded from (overwritten in place, or removed with its local file if the new name maps
+    /// to a different file name). A pre-split file that still holds secrets in plain text is
+    /// copied to `<slug>.toml.bak` once before it is rewritten.
     pub fn save_environment(
         &self,
         env: &Environment,
@@ -619,30 +780,46 @@ impl Store {
     ) -> Result<PathBuf, StoreError> {
         let dir = self.env_dir();
         fs::create_dir_all(&dir).map_err(io(&dir))?;
+        ensure_gitignore(&dir, ENV_GITIGNORE)?;
         let target = unique_path(&dir, &slug(&env.name), ".toml", replace);
-        let text = toml::to_string_pretty(&EnvFileRef {
-            schema_version: SCHEMA_VERSION,
-            name: &env.name,
-            variables: &env.variables,
-        })
-        .map_err(|e| StoreError::Serialize {
-            path: target.clone(),
-            msg: e.to_string(),
-        })?;
-        atomic_write(&target, &text)?;
         if let Some(old) = replace {
-            if old != target && old.exists() {
-                fs::remove_file(old).map_err(io(old))?;
+            secrets::backup_once(old)?;
+        }
+        secrets::write_split(&target, &env.variables, |vars| {
+            toml::to_string_pretty(&EnvFileRef {
+                schema_version: SCHEMA_VERSION,
+                name: &env.name,
+                variables: vars,
+            })
+            .map_err(|e| StoreError::Serialize {
+                path: target.clone(),
+                msg: e.to_string(),
+            })
+        })?;
+        if let Some(old) = replace {
+            if old != target {
+                for f in [old.to_path_buf(), local_path(old)] {
+                    if f.exists() {
+                        fs::remove_file(&f).map_err(io(&f))?;
+                    }
+                }
             }
         }
         Ok(target)
     }
 
+    /// Delete an environment file and its local (secrets) file. A backup is left alone.
     pub fn delete_environment(&self, path: &Path) -> Result<(), StoreError> {
-        fs::remove_file(path).map_err(io(path))
+        fs::remove_file(path).map_err(io(path))?;
+        let local = local_path(path);
+        if local.exists() {
+            fs::remove_file(&local).map_err(io(&local))?;
+        }
+        Ok(())
     }
 
-    /// Global variables; a missing file means none.
+    /// Global variables, with secret values from `globals.local.toml`; a missing file means
+    /// none.
     pub fn load_globals(&self) -> Result<Vec<EnvVar>, StoreError> {
         let path = self.globals_path();
         if !path.exists() {
@@ -653,20 +830,29 @@ impl Store {
             path: path.clone(),
             msg: e.to_string(),
         })?;
-        Ok(f.variables)
+        Ok(secrets::merge(f.variables, secrets::read_local(&path)?))
     }
 
+    /// Save the globals the same way as an environment: secret values go to
+    /// `globals.local.toml` (G-14).
     pub fn save_globals(&self, vars: &[EnvVar]) -> Result<(), StoreError> {
         let path = self.globals_path();
-        let text = toml::to_string_pretty(&GlobalsFileRef {
-            schema_version: SCHEMA_VERSION,
-            variables: vars,
+        if vars.iter().any(|v| v.secret) {
+            ensure_gitignore(&self.data_dir, GLOBALS_GITIGNORE)?;
+        }
+        if path.exists() {
+            secrets::backup_once(&path)?;
+        }
+        secrets::write_split(&path, vars, |vars| {
+            toml::to_string_pretty(&GlobalsFileRef {
+                schema_version: SCHEMA_VERSION,
+                variables: vars,
+            })
+            .map_err(|e| StoreError::Serialize {
+                path: path.clone(),
+                msg: e.to_string(),
+            })
         })
-        .map_err(|e| StoreError::Serialize {
-            path: path.clone(),
-            msg: e.to_string(),
-        })?;
-        atomic_write(&path, &text)
     }
 
     /// Settings; a missing or unreadable file gives the defaults (settings are never worth a crash).
@@ -720,7 +906,348 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use at_core::{ApiKeyLocation, Auth, Body, FormField, FormValue, KeyValue, Method};
+    use at_core::{ApiKeyLocation, Auth, Body, FormField, FormValue, KeyValue, Method, OAuth2};
+
+    fn without_uid(mut r: Request) -> Request {
+        r.uid.clear();
+        r
+    }
+
+    // ---- files written before uid / oauth2 / digest / graphql / folder.toml existed ----
+
+    const OLD_REQUEST: &str = r#"schema_version = 1
+
+[request]
+id = ""
+name = "Legacy"
+method = "POST"
+url = "https://{{host}}/users"
+pre_request_script = 'pm.variables.set("a", 1);'
+
+[[request.params]]
+key = "q"
+value = "1"
+description = ""
+enabled = true
+
+[[request.headers]]
+key = "X-A"
+value = "b"
+description = ""
+enabled = true
+
+[request.body]
+type = "json"
+raw = """
+{
+  "a": 1
+}"""
+
+[request.auth]
+type = "basic"
+username = "u"
+password = "p"
+
+[request.settings]
+timeout_ms = 30000
+follow_redirects = true
+verify_tls = true
+"#;
+
+    const OLD_SESSION: &str = r#"schema_version = 1
+active = 0
+
+[[tabs]]
+path = "c/a.toml"
+unsaved = true
+
+[tabs.draft]
+id = ""
+name = "Legacy"
+method = "POST"
+url = "https://{{host}}/users"
+
+[tabs.draft.body]
+type = "text"
+raw = "hi"
+
+[tabs.draft.auth]
+type = "jwt"
+token = "t"
+prefix = "JWT"
+
+[tabs.draft.settings]
+timeout_ms = 30000
+follow_redirects = true
+verify_tls = true
+"#;
+
+    const OLD_COLLECTION: &str = "schema_version = 1\nname = \"Old API\"\ndescription = \"\"\n";
+
+    #[test]
+    fn old_request_file_loads_and_resave_only_adds_uid() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        let col = store.create_collection("C").unwrap();
+        let path = col.dir.join("legacy.toml");
+        fs::write(&path, OLD_REQUEST).unwrap();
+
+        let r = Store::load_request(&path).unwrap();
+        assert_eq!(r.uid, "");
+        assert_eq!(r.name, "Legacy");
+        assert_eq!(
+            r.auth,
+            Auth::Basic {
+                username: "u".into(),
+                password: "p".into()
+            }
+        );
+
+        let saved = Store::save_request(&col.dir, &r, Some(&path)).unwrap();
+        assert_eq!(saved, path);
+        let text = fs::read_to_string(&path).unwrap();
+        let uid = Store::load_request(&path).unwrap().uid;
+        assert_eq!(uid.len(), 36, "uuid v4 text: {uid}");
+        let expected =
+            OLD_REQUEST.replacen("[request]\n", &format!("[request]\nuid = \"{uid}\"\n"), 1);
+        assert_eq!(text, expected);
+
+        // saving again changes nothing
+        let again = Store::load_request(&path).unwrap();
+        Store::save_request(&col.dir, &again, Some(&path)).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+    }
+
+    #[test]
+    fn old_session_and_settings_still_load() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        fs::write(store.session_path(), OLD_SESSION).unwrap();
+        let s = store.load_session().unwrap().unwrap();
+        assert_eq!(s.tabs.len(), 1);
+        let d = &s.tabs[0].draft;
+        assert_eq!(d.uid, "");
+        assert_eq!(d.body, Body::Text { raw: "hi".into() });
+        // re-saving a session doesn't add a uid (drafts aren't request files)
+        store.save_session(&s).unwrap();
+        assert!(!fs::read_to_string(store.session_path())
+            .unwrap()
+            .contains("uid"));
+
+        fs::write(
+            t.path().join("settings.toml"),
+            "schema_version = 1\nactive_environment = \"Dev\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            store.load_settings().active_environment.as_deref(),
+            Some("Dev")
+        );
+    }
+
+    #[test]
+    fn uid_survives_rename_and_move() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        let col = store.create_collection("C").unwrap();
+        let p1 = Store::save_request(&col.dir, &req("First", "https://a.test"), None).unwrap();
+        let uid = Store::load_request(&p1).unwrap().uid;
+        assert!(!uid.is_empty());
+
+        // the editor may not know the uid: it comes from the file being replaced
+        let p2 =
+            Store::save_request(&col.dir, &req("Renamed", "https://a.test"), Some(&p1)).unwrap();
+        assert!(!p1.exists());
+        assert_eq!(Store::load_request(&p2).unwrap().uid, uid);
+
+        let folder = Store::create_folder(&col.dir, "Sub").unwrap();
+        let p3 = Store::move_request(&p2, &folder).unwrap();
+        assert!(!p2.exists());
+        assert_eq!(p3.parent().unwrap(), folder);
+        assert_eq!(Store::load_request(&p3).unwrap().uid, uid);
+
+        // an explicit uid is kept; separate new requests get different ones
+        let other = Store::save_request(&col.dir, &req("Other", "https://a.test"), None).unwrap();
+        assert_ne!(Store::load_request(&other).unwrap().uid, uid);
+        let fixed = Request {
+            uid: "fixed".into(),
+            ..req("Fixed", "https://a.test")
+        };
+        let p4 = Store::save_request(&col.dir, &fixed, None).unwrap();
+        assert_eq!(Store::load_request(&p4).unwrap().uid, "fixed");
+    }
+
+    #[test]
+    fn collection_and_folder_meta_roundtrip_and_stay_out_of_the_tree() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        let col = store.create_collection("Meta API").unwrap();
+        // what create_collection writes is unchanged
+        assert_eq!(
+            fs::read_to_string(col.dir.join(COLLECTION_FILE)).unwrap(),
+            "schema_version = 1\nname = \"Meta API\"\ndescription = \"\"\n"
+        );
+        let cm = CollectionMeta {
+            name: "Meta API".into(),
+            description: "All the things".into(),
+            variables: vec![EnvVar::new("base", "https://m.test")],
+            headers: vec![KeyValue::new("X-Team", "core")],
+            auth: Auth::Bearer {
+                token: "{{token}}".into(),
+            },
+            pre_request_script: "console.log(1)".into(),
+            test_script: String::new(),
+            trusted: false,
+        };
+        Store::save_collection_meta(&col.dir, &cm).unwrap();
+        assert_eq!(Store::load_collection_meta(&col.dir).unwrap(), cm);
+
+        let folder = Store::create_folder(&col.dir, "Users").unwrap();
+        assert_eq!(
+            Store::load_folder_meta(&folder).unwrap(),
+            FolderMeta::default()
+        );
+        let fm = FolderMeta {
+            description: "user endpoints".into(),
+            auth: Auth::oauth2(OAuth2 {
+                client_id: "cid".into(),
+                ..Default::default()
+            }),
+            test_script: "pm.test('x', () => {})".into(),
+            ..Default::default()
+        };
+        Store::save_folder_meta(&folder, &fm).unwrap();
+        assert_eq!(Store::load_folder_meta(&folder).unwrap(), fm);
+        let text = fs::read_to_string(folder.join(FOLDER_FILE)).unwrap();
+        assert!(text.starts_with("schema_version = 1\n"), "{text}");
+        // a default folder file is just the version
+        let empty = Store::create_folder(&col.dir, "Empty").unwrap();
+        Store::save_folder_meta(&empty, &FolderMeta::default()).unwrap();
+        assert_eq!(
+            fs::read_to_string(empty.join(FOLDER_FILE)).unwrap(),
+            "schema_version = 1\n"
+        );
+
+        Store::save_request(&folder, &req("List", "https://x.test"), None).unwrap();
+        let all = store.load_all().unwrap();
+        assert_eq!(all[0].name, "Meta API");
+        let Node::Folder { children, .. } = all[0]
+            .children
+            .iter()
+            .find(|n| n.name() == "Users")
+            .unwrap()
+        else {
+            panic!()
+        };
+        let names: Vec<&str> = children.iter().map(|n| n.name()).collect();
+        assert_eq!(names, vec!["List"], "folder.toml is not a request");
+        assert!(all[0]
+            .children
+            .iter()
+            .all(|n| !matches!(n, Node::Broken { .. })));
+    }
+
+    #[test]
+    fn old_collection_file_and_missing_or_bad_meta() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        let dir = store.root().join("old-api");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(COLLECTION_FILE), OLD_COLLECTION).unwrap();
+        let m = Store::load_collection_meta(&dir).unwrap();
+        assert_eq!(m.name, "Old API");
+        assert_eq!(m.auth, Auth::None);
+        assert!(m.variables.is_empty());
+        assert_eq!(store.load_all().unwrap()[0].name, "Old API");
+
+        // no file: the directory name
+        let bare = store.root().join("bare");
+        fs::create_dir_all(&bare).unwrap();
+        assert_eq!(Store::load_collection_meta(&bare).unwrap().name, "bare");
+
+        // newer and corrupt files are errors, never silently defaults
+        fs::write(bare.join(FOLDER_FILE), "schema_version = 99\n").unwrap();
+        assert!(matches!(
+            Store::load_folder_meta(&bare),
+            Err(StoreError::TooNew { found: 99, .. })
+        ));
+        fs::write(bare.join(COLLECTION_FILE), "= =").unwrap();
+        assert!(Store::load_collection_meta(&bare).is_err());
+        // ... but the collection still lists, under its directory name
+        assert!(store.load_all().unwrap().iter().any(|c| c.name == "bare"));
+    }
+
+    #[test]
+    fn requests_named_like_settings_files() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        let col = store.create_collection("C").unwrap();
+        let p = Store::save_request(&col.dir, &req("Collection", "https://a.test"), None).unwrap();
+        assert_eq!(p.file_name().unwrap(), "collection-request.toml");
+        let folder = Store::create_folder(&col.dir, "F").unwrap();
+        let p = Store::save_request(&folder, &req("Folder", "https://a.test"), None).unwrap();
+        assert_eq!(p.file_name().unwrap(), "folder-request.toml");
+        assert_eq!(Store::load_collection_meta(&col.dir).unwrap().name, "C");
+
+        // an older request saved as folder.toml is still listed, and not taken for settings
+        let legacy = Store::create_folder(&col.dir, "Legacy").unwrap();
+        fs::write(legacy.join(FOLDER_FILE), OLD_REQUEST).unwrap();
+        let tree = Store::load_tree(&legacy).unwrap();
+        assert!(matches!(&tree[..], [Node::Request { name, .. }] if name == "Legacy"));
+        assert_eq!(
+            Store::load_folder_meta(&legacy).unwrap(),
+            FolderMeta::default()
+        );
+        assert!(Store::save_folder_meta(&legacy, &FolderMeta::default()).is_err());
+        assert!(fs::read_to_string(legacy.join(FOLDER_FILE))
+            .unwrap()
+            .contains("[request]"));
+    }
+
+    #[test]
+    fn new_variants_roundtrip_through_toml() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        let col = store.create_collection("C").unwrap();
+        for (i, (auth, body)) in [
+            (
+                Auth::oauth2(OAuth2 {
+                    token_url: "https://t.test".into(),
+                    scope: "read write".into(),
+                    ..Default::default()
+                }),
+                Body::GraphQl {
+                    query: "query {\n  me { id }\n}".into(),
+                    variables: "{\"a\": 1}".into(),
+                },
+            ),
+            (
+                Auth::Digest {
+                    username: "u".into(),
+                    password: "p".into(),
+                },
+                Body::None,
+            ),
+            (Auth::Inherit, Body::None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let r = Request {
+                auth,
+                body,
+                ..req(&format!("r{i}"), "https://a.test")
+            };
+            let p = Store::save_request(&col.dir, &r, None).unwrap();
+            assert_eq!(without_uid(Store::load_request(&p).unwrap()), r);
+        }
+        let text = fs::read_to_string(col.dir.join("r0.toml")).unwrap();
+        assert!(text.contains("[request.auth]\ntype = \"oauth2\""), "{text}");
+        assert!(
+            text.contains("[request.body]\ntype = \"graphql\""),
+            "{text}"
+        );
+    }
 
     fn req(name: &str, url: &str) -> Request {
         Request {
@@ -744,7 +1271,7 @@ mod tests {
             ..Default::default()
         };
         let path = Store::save_request(&col.dir, &r, None).unwrap();
-        assert_eq!(Store::load_request(&path).unwrap(), r);
+        assert_eq!(without_uid(Store::load_request(&path).unwrap()), r);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("pre_request_script"), "{text}");
         // requests without scripts don't grow empty keys
@@ -877,7 +1404,7 @@ mod tests {
         };
         let path = Store::save_request(&col.dir, &r, None).unwrap();
         assert_eq!(path.file_name().unwrap(), "create-user.toml");
-        assert_eq!(Store::load_request(&path).unwrap(), r);
+        assert_eq!(without_uid(Store::load_request(&path).unwrap()), r);
 
         let form = Request {
             name: "Upload".into(),
@@ -901,7 +1428,7 @@ mod tests {
             ..Default::default()
         };
         let p2 = Store::save_request(&col.dir, &form, None).unwrap();
-        assert_eq!(Store::load_request(&p2).unwrap(), form);
+        assert_eq!(without_uid(Store::load_request(&p2).unwrap()), form);
     }
 
     #[test]
@@ -1140,5 +1667,42 @@ active_environment = "Prod"
         assert!(s.verify_tls);
         assert_eq!(s.history_cap, 1000);
         assert_eq!(s.proxy, "");
+        assert_eq!(s.ca_bundle, "");
+        assert_eq!(s.min_tls, "");
+        assert!(s.client_certs.is_empty());
+    }
+
+    #[test]
+    fn settings_tls_fields_roundtrip_through_the_file() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        let s = Settings {
+            active_environment: Some("Prod".into()),
+            proxy: "http://proxy.test:8080".into(),
+            ca_bundle: "C:/certs/corp-ca.pem".into(),
+            min_tls: "1.3".into(),
+            client_certs: vec![
+                ClientCertSetting {
+                    host: "api.example.com".into(),
+                    path: "/certs/client.pem".into(),
+                    password: None,
+                },
+                ClientCertSetting {
+                    host: "legacy.example.com".into(),
+                    path: "/certs/legacy.p12".into(),
+                    password: Some("pw".into()),
+                },
+            ],
+            ..Default::default()
+        };
+        store.save_settings(&s).unwrap();
+        assert_eq!(store.load_settings(), s);
+        // the defaults add nothing to the file
+        store.save_settings(&Settings::default()).unwrap();
+        let text = fs::read_to_string(t.path().join("settings.toml")).unwrap();
+        assert!(
+            !text.contains("ca_bundle") && !text.contains("client_certs"),
+            "{text}"
+        );
     }
 }

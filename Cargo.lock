@@ -503,9 +503,11 @@ dependencies = [
 name = "at-core"
 version = "0.0.1"
 dependencies = [
+ "regex",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "uuid",
 ]
 
 [[package]]
@@ -563,6 +565,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "toml 0.8.23",
+ "uuid",
 ]
 
 [[package]]

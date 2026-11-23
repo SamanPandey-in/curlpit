@@ -296,7 +296,7 @@ impl Workspace {
                     .border_color(border)
                     .text_color(msg_col)
                     .child(if msg.is_empty() {
-                        "Use {{name}} in the URL, params, headers, body and auth. Secret values are masked here but stored as plain text on disk for now.".to_string()
+                        "Use {{name}} in the URL, params, headers, body and auth. Secret values are masked here and saved apart, in a git-ignored .local.toml file (still plain text).".to_string()
                     } else {
                         msg
                     }),

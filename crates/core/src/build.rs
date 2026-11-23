@@ -35,23 +35,65 @@ pub enum BuildError {
     EmptyUrl,
     #[error("URL must start with http:// or https:// (got `{0}`)")]
     InvalidUrl(String),
+    /// A stored auth type that can't be sent yet (OAuth 2.0, Digest).
+    #[error("{0} isn't supported yet")]
+    Unsupported(&'static str),
+    #[error("GraphQL variables must be a JSON object: {0}")]
+    GraphQlVariables(String),
 }
 
 fn has_header(h: &[(String, String)], name: &str) -> bool {
     h.iter().any(|(k, _)| k.eq_ignore_ascii_case(name))
 }
 
+/// Build the request as it will be sent.
+///
+/// Auth types that are stored but not sendable yet ([`Auth::unsupported`]: OAuth 2.0, Digest)
+/// are an error, never silently dropped. [`Auth::Inherit`] adds nothing: inheritance isn't
+/// resolved yet, so there is nothing to inherit.
 pub fn build(req: &Request, vars: &Variables) -> Result<Built, BuildError> {
     build_inner(req, vars, true)
 }
 
 /// Like [`build`], but the URL may still start with an unresolved `{{variable}}`. Used for code
-/// snippets that keep placeholders; never for sending.
+/// snippets that keep placeholders; never for sending. Unsupported auth types add nothing
+/// here instead of failing, so a snippet can still be shown.
 pub fn build_template(req: &Request, vars: &Variables) -> Result<Built, BuildError> {
     build_inner(req, vars, false)
 }
 
-fn build_inner(req: &Request, vars: &Variables, require_scheme: bool) -> Result<Built, BuildError> {
+/// `{"query": …, "variables": …}`; empty or `null` variables are left out. Variables must be a
+/// JSON object when sending; a template (code snippet) keeps invalid text as typed, since it may
+/// be an unresolved `{{placeholder}}`.
+fn graphql_body(query: String, variables: &str, sending: bool) -> Result<Vec<u8>, BuildError> {
+    use serde_json::Value;
+    let mut o = serde_json::Map::new();
+    o.insert("query".into(), Value::String(query));
+    let variables = variables.trim();
+    if !variables.is_empty() {
+        let parsed = match serde_json::from_str::<Value>(variables) {
+            Ok(v @ (Value::Object(_) | Value::Null)) => Ok(v),
+            Ok(_) => Err("got a JSON value of another type".to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        match parsed {
+            Ok(Value::Null) => {}
+            Ok(v) => {
+                o.insert("variables".into(), v);
+            }
+            Err(msg) if sending => return Err(BuildError::GraphQlVariables(msg)),
+            Err(_) => {
+                let head = Value::Object(o).to_string();
+                let head = head.strip_suffix('}').unwrap_or(&head);
+                return Ok(format!("{head},\"variables\":{variables}}}").into_bytes());
+            }
+        }
+    }
+    Ok(Value::Object(o).to_string().into_bytes())
+}
+
+fn build_inner(req: &Request, vars: &Variables, sending: bool) -> Result<Built, BuildError> {
+    let require_scheme = sending;
     let mut unresolved: Vec<String> = Vec::new();
     let mut r = |s: &str| -> String {
         let res = vars.resolve(s);
@@ -95,7 +137,15 @@ fn build_inner(req: &Request, vars: &Variables, require_scheme: bool) -> Result<
     // ---- auth (applied at send time, FR-AUTH-02) ----
     let user_set_auth = has_header(&headers, "authorization");
     match &req.auth {
-        Auth::None => {}
+        // nothing to inherit until folder/collection resolution exists
+        Auth::None | Auth::Inherit => {}
+        Auth::OAuth2(_) | Auth::Digest { .. } => {
+            if sending {
+                return Err(BuildError::Unsupported(
+                    req.auth.unsupported().unwrap_or("this auth type"),
+                ));
+            }
+        }
         Auth::Basic { username, password } => {
             if !user_set_auth {
                 let cred = format!("{}:{}", r(username), r(password));
@@ -216,6 +266,10 @@ fn build_inner(req: &Request, vars: &Variables, require_scheme: bool) -> Result<
                 })
                 .collect();
             BuiltBody::Multipart(parts)
+        }
+        Body::GraphQl { query, variables } => {
+            default_ct = Some("application/json");
+            BuiltBody::Bytes(graphql_body(r(query), &r(variables), sending)?)
         }
     };
     if let Some(ct) = default_ct {
@@ -476,6 +530,120 @@ mod tests {
                 &v
             ),
             Err(BuildError::InvalidUrl(_))
+        ));
+    }
+
+    #[test]
+    fn unsupported_auth_is_a_clear_error_but_snippets_still_build() {
+        let v = Variables::default();
+        for (auth, msg) in [
+            (
+                Auth::oauth2(OAuth2::default()),
+                "OAuth 2.0 isn't supported yet",
+            ),
+            (
+                Auth::Digest {
+                    username: "u".into(),
+                    password: "p".into(),
+                },
+                "Digest auth isn't supported yet",
+            ),
+        ] {
+            let req = Request {
+                url: "https://x.test".into(),
+                auth,
+                ..Default::default()
+            };
+            let err = build(&req, &v).unwrap_err();
+            assert_eq!(err.to_string(), msg);
+            let t = build_template(&req, &v).unwrap();
+            assert!(!has_header(&t.headers, "authorization"));
+        }
+    }
+
+    #[test]
+    fn inherit_with_nothing_to_inherit_is_none() {
+        let req = Request {
+            url: "https://x.test".into(),
+            auth: Auth::Inherit,
+            ..Default::default()
+        };
+        let b = build(&req, &Variables::default()).unwrap();
+        assert!(b.headers.is_empty());
+        assert_eq!(b.url, "https://x.test");
+    }
+
+    #[test]
+    fn graphql_is_a_json_body() {
+        let mut v = Variables::default();
+        v.environment.insert("id".into(), "42".into());
+        let req = Request {
+            method: Method::Post,
+            url: "https://g.test/graphql".into(),
+            body: Body::GraphQl {
+                query: "query($id: ID!) { user(id: $id) { name } }".into(),
+                variables: "{\"id\": \"{{id}}\"}".into(),
+            },
+            ..Default::default()
+        };
+        let b = build(&req, &v).unwrap();
+        assert!(b
+            .headers
+            .contains(&("Content-Type".into(), "application/json".into())));
+        let BuiltBody::Bytes(bytes) = &b.body else {
+            panic!("{:?}", b.body)
+        };
+        let json: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "query": "query($id: ID!) { user(id: $id) { name } }",
+                "variables": {"id": "42"}
+            })
+        );
+
+        // no variables: just the query
+        let plain = Request {
+            body: Body::GraphQl {
+                query: "{ me { id } }".into(),
+                variables: "  ".into(),
+            },
+            ..req.clone()
+        };
+        let BuiltBody::Bytes(bytes) = build(&plain, &v).unwrap().body else {
+            panic!()
+        };
+        assert_eq!(bytes, br#"{"query":"{ me { id } }"}"#);
+
+        // bad variables: an error when sending, kept as typed in a snippet
+        let bad = Request {
+            body: Body::GraphQl {
+                query: "{ a }".into(),
+                variables: "{\"n\": {{n}}}".into(),
+            },
+            ..req.clone()
+        };
+        assert!(matches!(
+            build(&bad, &v),
+            Err(BuildError::GraphQlVariables(_))
+        ));
+        let BuiltBody::Bytes(bytes) = build_template(&bad, &v).unwrap().body else {
+            panic!()
+        };
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            r#"{"query":"{ a }","variables":{"n": {{n}}}}"#
+        );
+        let array = Request {
+            body: Body::GraphQl {
+                query: "{ a }".into(),
+                variables: "[1]".into(),
+            },
+            ..req
+        };
+        assert!(matches!(
+            build(&array, &v),
+            Err(BuildError::GraphQlVariables(_))
         ));
     }
 }

@@ -9,7 +9,11 @@ name = "at_core"
 
 [dependencies]
 serde.workspace = true
+# GraphQL bodies are built as JSON (and their variables validated).
+serde_json.workspace = true
 thiserror.workspace = true
+# Dynamic `{{$guid}}`-style variables: v4 UUIDs, and the OS random source for the others.
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-serde_json.workspace = true
+regex = "1"

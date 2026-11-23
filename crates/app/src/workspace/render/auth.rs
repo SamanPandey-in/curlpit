@@ -113,13 +113,23 @@ impl Workspace {
                         .child(reveal),
                 )
                 .into_any_element(),
-            AuthKind::Kept => div()
-                .text_color(muted)
-                .child(format!(
-                    "This request uses {} from its file. It is sent and saved unchanged; pick another type above to replace it.",
-                    tab.kept_auth().unwrap_or("an auth type")
-                ))
-                .into_any_element(),
+            AuthKind::Kept => match tab.kept_auth_note() {
+                // read-only: a type without an editor that can't be sent as-is yet
+                Some(note) => div()
+                    .text_color(muted)
+                    .child(format!(
+                        "This request uses {} from its file. {note} Pick another type above to replace it.",
+                        tab.kept_auth().unwrap_or("an auth type")
+                    ))
+                    .into_any_element(),
+                None => div()
+                    .text_color(muted)
+                    .child(format!(
+                        "This request uses {} from its file. It is sent and saved unchanged; pick another type above to replace it.",
+                        tab.kept_auth().unwrap_or("an auth type")
+                    ))
+                    .into_any_element(),
+            },
         };
         div()
             .p_2()

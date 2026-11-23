@@ -9,7 +9,7 @@ use std::path::Path;
 
 use at_core::{
     ApiKeyLocation, Auth, Body, EnvVar, Environment, FormField, FormValue, KeyValue, Method,
-    Request, RequestSettings,
+    OAuth2, OAuth2ClientAuth, OAuth2Grant, Request, RequestSettings,
 };
 use at_store::{Node, Store, StoreError};
 use serde_json::{json, Map, Value};
@@ -212,10 +212,7 @@ impl Ctx {
             let name = str_of(it, "name").unwrap_or_default();
             if it.get("item").is_some() {
                 let own = Inherited {
-                    auth: match it.get("auth") {
-                        Some(a) => self.auth(a),
-                        None => inherited.auth.clone(),
-                    },
+                    auth: self.own_auth(it.get("auth"), &inherited.auth),
                     pre: event_script(it, "prerequest"),
                     test: event_script(it, "test"),
                 };
@@ -275,10 +272,7 @@ impl Ctx {
         let (url, params) = self.url(r.get("url"));
         let headers = kv_list(r.get("header"));
         let body = self.body(r.get("body"));
-        let auth = match r.get("auth") {
-            Some(a) => self.auth(a),
-            None => inherited.clone(),
-        };
+        let auth = self.own_auth(r.get("auth"), inherited);
         Request {
             method: method.unwrap_or_default(),
             url,
@@ -382,21 +376,14 @@ impl Ctx {
                 Body::FormData { fields }
             }
             Some("graphql") => {
-                self.warn(
-                    "GraphQL bodies were converted to plain JSON ({\"query\", \"variables\"})"
-                        .into(),
-                );
-                let query = b.pointer("/graphql/query").cloned().unwrap_or(Value::Null);
-                let vars = match b.pointer("/graphql/variables") {
-                    Some(Value::String(s)) if !s.trim().is_empty() => {
-                        serde_json::from_str(s).unwrap_or(Value::String(s.clone()))
-                    }
-                    Some(Value::String(_)) | None => Value::Null,
-                    Some(v) => v.clone(),
+                let query = scalar(b.pointer("/graphql/query"));
+                // Postman keeps variables as JSON text; tolerate an object too
+                let variables = match b.pointer("/graphql/variables") {
+                    Some(Value::String(s)) => s.clone(),
+                    None | Some(Value::Null) => String::new(),
+                    Some(v) => serde_json::to_string_pretty(v).unwrap_or_default(),
                 };
-                let raw = serde_json::to_string_pretty(&json!({"query": query, "variables": vars}))
-                    .unwrap_or_default();
-                Body::Json { raw }
+                Body::GraphQl { query, variables }
             }
             Some("file") => {
                 self.warn("binary file bodies were not imported".into());
@@ -425,6 +412,21 @@ impl Ctx {
                     ApiKeyLocation::Header
                 },
             },
+            // only reached at the collection root, where there is nothing above to inherit
+            "inherit" => Auth::None,
+            "digest" => {
+                self.warn("Digest auth was imported, but sending it isn't supported yet".into());
+                Auth::Digest {
+                    username: p("username"),
+                    password: p("password"),
+                }
+            }
+            "oauth2" => {
+                self.warn(
+                    "OAuth 2.0 settings were imported, but sending them isn't supported yet".into(),
+                );
+                self.oauth2(&p)
+            }
             other => {
                 self.warn(format!(
                     "\"{other}\" authorization is not supported yet; those requests were imported without auth"
@@ -432,6 +434,68 @@ impl Ctx {
                 Auth::None
             }
         }
+    }
+
+    /// An item's own auth, or what it inherits when it has none (or says `inherit`).
+    fn own_auth(&mut self, a: Option<&Value>, inherited: &Auth) -> Auth {
+        match a {
+            Some(a) if str_of(a, "type").as_deref() != Some("inherit") => self.auth(a),
+            _ => inherited.clone(),
+        }
+    }
+
+    /// Postman v2.1 `oauth2` parameters (`grant_type`, `authUrl`, `accessTokenUrl`, ...).
+    fn oauth2(&mut self, p: &dyn Fn(&str) -> String) -> Auth {
+        let (grant_type, pkce) = match p("grant_type").as_str() {
+            "authorization_code_with_pkce" => (OAuth2Grant::AuthorizationCode, true),
+            // Postman's default when the key is missing
+            "authorization_code" | "" => (OAuth2Grant::AuthorizationCode, false),
+            "client_credentials" => (OAuth2Grant::ClientCredentials, false),
+            "password_credentials" => (OAuth2Grant::Password, false),
+            "device_code" => (OAuth2Grant::DeviceCode, false),
+            other => {
+                self.warn(format!(
+                    "the OAuth 2.0 \"{other}\" grant isn't supported; it was imported as authorization code with PKCE"
+                ));
+                (OAuth2Grant::AuthorizationCode, true)
+            }
+        };
+        if !p("accessToken").is_empty() {
+            self.warn("OAuth 2.0 access tokens were not imported; get a new token".into());
+        }
+        let or = |key: &str, default: &str| {
+            let v = p(key);
+            if v.is_empty() {
+                default.to_string()
+            } else {
+                v
+            }
+        };
+        Auth::oauth2(OAuth2 {
+            grant_type,
+            pkce,
+            auth_url: p("authUrl"),
+            token_url: p("accessTokenUrl"),
+            refresh_url: p("refreshTokenUrl"),
+            client_id: p("clientId"),
+            client_secret: p("clientSecret"),
+            scope: p("scope"),
+            redirect_uri: p("redirect_uri"),
+            state: p("state"),
+            username: p("username"),
+            password: p("password"),
+            client_auth: if p("client_authentication") == "body" {
+                OAuth2ClientAuth::Body
+            } else {
+                OAuth2ClientAuth::Header
+            },
+            add_token_to: if p("addTokenTo") == "queryParams" {
+                ApiKeyLocation::Query
+            } else {
+                ApiKeyLocation::Header
+            },
+            header_prefix: or("headerPrefix", "Bearer"),
+        })
     }
 }
 
@@ -567,6 +631,20 @@ fn export_request(r: &Request, warnings: &mut Vec<String>) -> Value {
 
     match &r.auth {
         Auth::None => {}
+        // no `auth` key is Postman's "inherit auth from parent"
+        Auth::Inherit => {}
+        Auth::Digest { username, password } => {
+            request.insert(
+                "auth".into(),
+                json!({"type": "digest", "digest": [
+                    {"key": "username", "value": username, "type": "string"},
+                    {"key": "password", "value": password, "type": "string"},
+                ]}),
+            );
+        }
+        Auth::OAuth2(o) => {
+            request.insert("auth".into(), export_oauth2(o, warnings));
+        }
         Auth::Basic { username, password } => {
             request.insert(
                 "auth".into(),
@@ -661,6 +739,10 @@ fn export_request(r: &Request, warnings: &mut Vec<String>) -> Value {
                 o
             }).collect::<Vec<_>>(),
         })),
+        Body::GraphQl { query, variables } => Some(json!({
+            "mode": "graphql",
+            "graphql": {"query": query, "variables": variables},
+        })),
     };
     if let Some(b) = body {
         request.insert("body".into(), b);
@@ -702,6 +784,64 @@ fn export_request(r: &Request, warnings: &mut Vec<String>) -> Value {
         }
     }
     Value::Object(item)
+}
+
+/// Postman v2.1 `oauth2` auth: a list of `{key, value}` parameters.
+fn export_oauth2(o: &OAuth2, warnings: &mut Vec<String>) -> Value {
+    let grant = match (o.grant_type, o.pkce) {
+        (OAuth2Grant::AuthorizationCode, true) => "authorization_code_with_pkce",
+        (OAuth2Grant::AuthorizationCode, false) => "authorization_code",
+        (OAuth2Grant::ClientCredentials, _) => "client_credentials",
+        (OAuth2Grant::Password, _) => "password_credentials",
+        (OAuth2Grant::DeviceCode, _) => {
+            let w = "Postman has no OAuth 2.0 device code grant; it was exported as is and Postman may not recognise it".to_string();
+            if !warnings.contains(&w) {
+                warnings.push(w);
+            }
+            "device_code"
+        }
+    };
+    let mut params = vec![
+        ("grant_type", grant.to_string()),
+        (
+            "addTokenTo",
+            match o.add_token_to {
+                ApiKeyLocation::Header => "header",
+                ApiKeyLocation::Query => "queryParams",
+            }
+            .to_string(),
+        ),
+        (
+            "client_authentication",
+            match o.client_auth {
+                OAuth2ClientAuth::Header => "header",
+                OAuth2ClientAuth::Body => "body",
+            }
+            .to_string(),
+        ),
+        ("headerPrefix", o.header_prefix.clone()),
+    ];
+    for (key, value) in [
+        ("authUrl", &o.auth_url),
+        ("accessTokenUrl", &o.token_url),
+        ("refreshTokenUrl", &o.refresh_url),
+        ("clientId", &o.client_id),
+        ("clientSecret", &o.client_secret),
+        ("scope", &o.scope),
+        ("redirect_uri", &o.redirect_uri),
+        ("state", &o.state),
+        ("username", &o.username),
+        ("password", &o.password),
+    ] {
+        if !value.is_empty() {
+            params.push((key, value.clone()));
+        }
+    }
+    let list: Vec<Value> = params
+        .into_iter()
+        .map(|(k, v)| json!({"key": k, "value": v, "type": "string"}))
+        .collect();
+    json!({"type": "oauth2", "oauth2": list})
 }
 
 fn kv_json(kv: &KeyValue) -> Value {
@@ -748,16 +888,52 @@ pub fn export_environment(
 pub struct WriteSummary {
     pub requests: usize,
     pub folders: usize,
+    /// Non-empty pre-request and test scripts brought in ([`count_scripts`]). When this is
+    /// above zero the collection was written as untrusted (G-16).
+    pub scripts: usize,
+}
+
+/// How many scripts a collection carries: every non-blank pre-request script plus every
+/// non-blank test script, over all requests in all folders. Collection- and folder-level
+/// scripts are already copied into their requests on import (D28), so they count once per
+/// request that received them.
+pub fn count_scripts(col: &Collection) -> usize {
+    fn walk(items: &[Item]) -> usize {
+        items
+            .iter()
+            .map(|it| match it {
+                Item::Folder { items, .. } => walk(items),
+                Item::Request(r) => {
+                    usize::from(!r.pre_request_script.trim().is_empty())
+                        + usize::from(!r.test_script.trim().is_empty())
+                }
+            })
+            .sum()
+    }
+    walk(&col.items)
 }
 
 /// Write an imported collection as a new collection on disk (never merges into an existing one;
 /// a name clash gets a new directory). Returns the collection directory.
+///
+/// A collection that brings any scripts is marked untrusted in its `collection.toml`
+/// (`trusted = false`, G-16): the app does not run its scripts until the user trusts it.
 pub fn write_collection(
     store: &Store,
     col: &Collection,
 ) -> Result<(std::path::PathBuf, WriteSummary), InteropError> {
     let tree = store.create_collection(&col.name)?;
-    let mut sum = WriteSummary::default();
+    let mut sum = WriteSummary {
+        scripts: count_scripts(col),
+        ..Default::default()
+    };
+    if sum.scripts > 0 {
+        // Written before any request, so a failure part-way never leaves a trusted
+        // collection holding imported scripts.
+        let mut meta = Store::load_collection_meta(&tree.dir)?;
+        meta.trusted = false;
+        Store::save_collection_meta(&tree.dir, &meta)?;
+    }
     write_items(&tree.dir, &col.items, &mut sum)?;
     Ok((tree.dir, sum))
 }
@@ -929,7 +1105,13 @@ mod tests {
             },
             "v2.0 object form"
         );
-        assert_eq!(find(&c.items, "OAuth thing").auth, Auth::None);
+        assert_eq!(
+            find(&c.items, "OAuth thing").auth,
+            Auth::oauth2(OAuth2 {
+                pkce: false,
+                ..Default::default()
+            })
+        );
         assert_eq!(
             find(&c.items, "Bare").auth,
             Auth::Bearer {
@@ -981,7 +1163,7 @@ mod tests {
             "{all}"
         );
         assert!(all.contains("collection variable"), "{all}");
-        assert!(all.contains("oauth2"), "{all}");
+        assert!(all.contains("OAuth 2.0 settings were imported"), "{all}");
         assert!(all.contains("path variables"), "{all}");
     }
 
@@ -1126,22 +1308,130 @@ mod tests {
     }
 
     #[test]
-    fn graphql_becomes_json() {
+    fn graphql_imports_and_exports_as_graphql() {
         let g = r#"{"info": {"name": "g"}, "item": [{"name": "q", "request": {"method": "POST",
           "body": {"mode": "graphql", "graphql": {"query": "{ me { id } }", "variables": "{\"a\":1}"}},
+          "url": "https://g.test"}},
+          {"name": "obj", "request": {"method": "POST",
+          "body": {"mode": "graphql", "graphql": {"query": "{ x }", "variables": {"b": 2}}},
           "url": "https://g.test"}}]}"#;
         let Imported::Collection(c, w) = import_postman(g).unwrap() else {
             panic!()
         };
-        match &find(&c.items, "q").body {
-            Body::Json { raw } => {
-                let v: Value = serde_json::from_str(raw).unwrap();
-                assert_eq!(v["query"], "{ me { id } }");
-                assert_eq!(v["variables"]["a"], 1);
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(
+            find(&c.items, "q").body,
+            Body::GraphQl {
+                query: "{ me { id } }".into(),
+                variables: "{\"a\":1}".into()
+            }
+        );
+        match &find(&c.items, "obj").body {
+            Body::GraphQl { variables, .. } => {
+                let v: Value = serde_json::from_str(variables).unwrap();
+                assert_eq!(v["b"], 2);
             }
             other => panic!("{other:?}"),
         }
-        assert!(w.iter().any(|w| w.contains("GraphQL")));
+        let (text, _) = export_collection(&c);
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["item"][0]["request"]["body"]["mode"], "graphql");
+        let Imported::Collection(back, _) = import_postman(&text).unwrap() else {
+            panic!()
+        };
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn oauth2_digest_and_inherit_map_both_ways() {
+        let doc = r#"{"info": {"name": "a"},
+          "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "root"}]},
+          "item": [
+            {"name": "O", "request": {"method": "GET", "url": "https://o.test",
+              "auth": {"type": "oauth2", "oauth2": [
+                {"key": "grant_type", "value": "client_credentials"},
+                {"key": "accessTokenUrl", "value": "https://id.test/token"},
+                {"key": "clientId", "value": "cid"},
+                {"key": "clientSecret", "value": "{{secret}}"},
+                {"key": "scope", "value": "read"},
+                {"key": "addTokenTo", "value": "queryParams"},
+                {"key": "client_authentication", "value": "body"},
+                {"key": "accessToken", "value": "stale"}]}}},
+            {"name": "P", "request": {"method": "GET", "url": "https://o.test",
+              "auth": {"type": "oauth2", "oauth2": [
+                {"key": "grant_type", "value": "authorization_code_with_pkce"},
+                {"key": "authUrl", "value": "https://id.test/auth"},
+                {"key": "headerPrefix", "value": "Token"}]}}},
+            {"name": "D", "request": {"method": "GET", "url": "https://d.test",
+              "auth": {"type": "digest", "digest": [
+                {"key": "username", "value": "u"}, {"key": "password", "value": "p"},
+                {"key": "realm", "value": "r"}]}}},
+            {"name": "I", "request": {"method": "GET", "url": "https://i.test",
+              "auth": {"type": "inherit"}}}
+          ]}"#;
+        let Imported::Collection(c, w) = import_postman(doc).unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            find(&c.items, "O").auth,
+            Auth::oauth2(OAuth2 {
+                grant_type: OAuth2Grant::ClientCredentials,
+                pkce: false,
+                token_url: "https://id.test/token".into(),
+                client_id: "cid".into(),
+                client_secret: "{{secret}}".into(),
+                scope: "read".into(),
+                add_token_to: ApiKeyLocation::Query,
+                client_auth: OAuth2ClientAuth::Body,
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            find(&c.items, "P").auth,
+            Auth::oauth2(OAuth2 {
+                auth_url: "https://id.test/auth".into(),
+                header_prefix: "Token".into(),
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            find(&c.items, "D").auth,
+            Auth::Digest {
+                username: "u".into(),
+                password: "p".into()
+            }
+        );
+        // inheritance is still flattened on import
+        assert_eq!(
+            find(&c.items, "I").auth,
+            Auth::Bearer {
+                token: "root".into()
+            }
+        );
+        let all = w.join("\n");
+        assert!(all.contains("access tokens were not imported"), "{all}");
+        assert!(all.contains("Digest auth was imported"), "{all}");
+
+        let (text, warnings) = export_collection(&c);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let Imported::Collection(back, _) = import_postman(&text).unwrap() else {
+            panic!()
+        };
+        assert_eq!(back, c);
+
+        // our Inherit exports as "no auth key", which Postman reads as inherit
+        let inherit = Collection {
+            name: "x".into(),
+            items: vec![Item::Request(Request {
+                name: "i".into(),
+                url: "https://i.test".into(),
+                auth: Auth::Inherit,
+                ..Default::default()
+            })],
+        };
+        let (text, _) = export_collection(&inherit);
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert!(v["item"][0]["request"].get("auth").is_none());
     }
 
     #[test]
@@ -1154,10 +1444,13 @@ mod tests {
             sum,
             WriteSummary {
                 requests: 6,
-                folders: 1
+                folders: 1,
+                // the collection-level pre-request script was copied into all six requests
+                scripts: 6,
             }
         );
         assert!(dir.join("Pets").is_dir());
+        assert!(!Store::load_collection_meta(&dir).unwrap().trusted);
         // importing the same file again makes a second collection, never merges
         let (dir2, _) = write_collection(&store, &c).unwrap();
         assert_ne!(dir, dir2);
@@ -1187,6 +1480,79 @@ mod tests {
                 "Upload"
             ]
         );
-        assert_eq!(find(&back.items, "List pets"), find(&c.items, "List pets"));
+        // saving gave each request a uid; Postman has none to compare against
+        let mut listed = find(&back.items, "List pets").clone();
+        assert!(!listed.uid.is_empty());
+        listed.uid.clear();
+        assert_eq!(&listed, find(&c.items, "List pets"));
+    }
+
+    fn scripted(name: &str, pre: &str, test: &str) -> Item {
+        Item::Request(Request {
+            name: name.into(),
+            pre_request_script: pre.into(),
+            test_script: test.into(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn count_scripts_counts_non_blank_scripts_in_every_folder() {
+        let col = Collection {
+            name: "c".into(),
+            items: vec![
+                scripted(
+                    "none", "", "  
+ ",
+                ),
+                scripted("both", "pm.x()", "pm.test()"),
+                Item::Folder {
+                    name: "f".into(),
+                    items: vec![
+                        scripted("pre", "a()", ""),
+                        Item::Folder {
+                            name: "g".into(),
+                            items: vec![scripted("test", "", "b()")],
+                        },
+                    ],
+                },
+            ],
+        };
+        assert_eq!(count_scripts(&col), 4);
+        assert_eq!(
+            count_scripts(&Collection {
+                name: "e".into(),
+                items: vec![]
+            }),
+            0
+        );
+    }
+
+    #[test]
+    fn imports_without_scripts_stay_trusted() {
+        let t = tempfile::tempdir().unwrap();
+        let store = Store::open_at(t.path()).unwrap();
+        let col = Collection {
+            name: "Plain".into(),
+            items: vec![scripted("a", "", ""), scripted("b", " ", "")],
+        };
+        let (dir, sum) = write_collection(&store, &col).unwrap();
+        assert_eq!(sum.scripts, 0);
+        assert!(Store::load_collection_meta(&dir).unwrap().trusted);
+        // and a collection made in the app is trusted too
+        let made = store.create_collection("Mine").unwrap();
+        assert!(Store::load_collection_meta(&made.dir).unwrap().trusted);
+    }
+
+    #[test]
+    fn script_count_is_the_same_for_every_import_format() {
+        let (c, _) = collection();
+        let n = count_scripts(&c);
+        assert_eq!(n, 6);
+        // the native JSON round trip keeps every script
+        match import_any(&export_json(&c)).unwrap() {
+            Imported::Collection(back, _) => assert_eq!(count_scripts(&back), n),
+            other => panic!("expected a collection, got {other:?}"),
+        }
     }
 }

@@ -156,17 +156,30 @@ impl Workspace {
                     return false;
                 }
                 let old = self.envs.get(ix).map(|(_, p)| p.clone());
+                // A pre-split file (secrets in plain text) is backed up on this save (G-14).
+                let had_backup = old
+                    .as_deref()
+                    .map(|p| at_store::backup_path(p).exists())
+                    .unwrap_or(true);
                 let env = Environment {
                     name,
                     variables: vars,
                 };
                 match store.save_environment(&env, old.as_deref()) {
                     Ok(path) => {
+                        let backup = old.as_deref().map(at_store::backup_path);
+                        self.status = match backup {
+                            Some(b) if !had_backup && b.exists() => Status::Info(format!(
+                                "Environment saved. Secret values now live in {}; the old file is kept as {}",
+                                at_store::local_path(&path).display(),
+                                b.display()
+                            )),
+                            _ => Status::Info("Environment saved".into()),
+                        };
                         if ix < self.envs.len() {
                             self.envs[ix] = (env, path);
                         }
                         self.persist_active();
-                        self.status = Status::Info("Environment saved".into());
                         true
                     }
                     Err(e) => {
