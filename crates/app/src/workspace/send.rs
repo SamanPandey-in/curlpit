@@ -64,6 +64,7 @@ pub(crate) async fn execute(
     token: CancellationToken,
     history: Option<Arc<Mutex<History>>>,
     cookies: Arc<CookieJar>,
+    proxy: String,
 ) -> (SendOutcome, Variables) {
     let env_before = to_var_map(&vars.environment);
     let globals_before = to_var_map(&vars.global);
@@ -107,6 +108,7 @@ pub(crate) async fn execute(
     let started = Instant::now();
     let engine = EngineConfig {
         cookies: Some(cookies),
+        proxy,
         ..Default::default()
     };
     let r = send(&built, &req.settings, &engine, &token).await;
@@ -174,8 +176,9 @@ impl Workspace {
         let (tx, rx) = async_channel::bounded(1);
         let history = self.history.clone();
         let cookies = self.cookies.clone();
+        let proxy = self.settings.proxy.clone();
         self.rt.spawn(async move {
-            let (out, _) = execute(req, vars, env_name, token, history, cookies).await;
+            let (out, _) = execute(req, vars, env_name, token, history, cookies, proxy).await;
             let _ = tx.send(out).await;
         });
 

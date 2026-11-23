@@ -68,6 +68,7 @@ pub(crate) enum MainView {
     Environments,
     Runner,
     Cookies,
+    Settings,
 }
 
 /// What the environments page is editing.

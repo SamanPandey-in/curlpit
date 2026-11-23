@@ -161,6 +161,14 @@ impl Workspace {
                     .on_click(cx.listener(|this, _ev, window, cx| this.on_import(window, cx))),
             )
             .child(
+                quiet_btn("col-paste", "Paste".to_string(), cx)
+                    .xsmall()
+                    .tooltip("Import a collection or environment from the clipboard")
+                    .on_click(
+                        cx.listener(|this, _ev, window, cx| this.import_from_clipboard(window, cx)),
+                    ),
+            )
+            .child(
                 quiet_btn("col-export", "Export…".to_string(), cx)
                     .xsmall()
                     .tooltip("Export the selected collection")

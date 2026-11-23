@@ -13,6 +13,10 @@ actions!(
         CloseTab,
         ReopenTab,
         FindInResponse,
-        ToggleSidebar
+        ToggleSidebar,
+        ToggleCommandPalette,
+        PaletteNext,
+        PalettePrev,
+        PaletteDismiss
     ]
 );

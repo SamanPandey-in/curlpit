@@ -317,9 +317,15 @@ impl Workspace {
     /// that are not a request on the right — Zed's place for panel toggles.
     pub(super) fn render_status_bar(&self, cx: &Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
-        let note = match &self.status {
-            Status::Info(m) => Some((m.clone(), p.text_muted())),
-            Status::Error(e) => Some((e.clone(), p.status_error())),
+        // Workspace messages belong to the page that raised them (variables, settings,
+        // imports from a page); on the request view the tab's own status says what happened.
+        let note = match (
+            &self.status,
+            self.main_view == crate::sidebar::MainView::Request,
+        ) {
+            (_, true) => None,
+            (Status::Info(m), _) => Some((m.clone(), p.text_muted())),
+            (Status::Error(e), _) => Some((e.clone(), p.status_error())),
             _ => None,
         };
         let page = |id: &'static str, label: &'static str, on: bool| {
@@ -393,6 +399,17 @@ impl Workspace {
                         )
                         .xsmall()
                         .on_click(cx.listener(|this, _ev, _window, cx| this.open_cookies(cx))),
+                    )
+                    .child(
+                        page(
+                            "open-settings",
+                            "Settings",
+                            self.main_view == MainView::Settings,
+                        )
+                        .xsmall()
+                        .on_click(
+                            cx.listener(|this, _ev, window, cx| this.open_settings(window, cx)),
+                        ),
                     )
                     .child(
                         page(

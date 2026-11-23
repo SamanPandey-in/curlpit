@@ -11,10 +11,12 @@ mod environments;
 mod find;
 mod history;
 mod interop;
+mod palette;
 mod render;
 mod runner;
 mod send;
 mod session;
+mod settings_page;
 mod tabs;
 mod tree;
 
@@ -26,10 +28,10 @@ use crate::ui::Status;
 use crate::workspace::session::SESSION_SAVE_EVERY;
 use at_codegen::Lang;
 use at_core::{Body, EnvVar, Environment, Request, Variables};
-use at_history::{History, Summary};
+use at_history::{History, Summary, DEFAULT_MAX_BODY};
 use at_http::{CookieJar, HttpError};
 use at_script::{ScriptOutput, VarMap};
-use at_store::{Session, Store, StoreError};
+use at_store::{Session, Settings, Store, StoreError};
 use gpui::prelude::*;
 use gpui::{Context, Entity, FocusHandle, Subscription, Window};
 use gpui_component::input::{InputEvent, InputState};
@@ -67,6 +69,13 @@ pub(crate) struct Workspace {
     hist_search: Entity<InputState>,
     /// Why history is unavailable or the last history operation failed.
     hist_error: Option<String>,
+    palette_query: Entity<InputState>,
+    palette: Option<palette::PaletteState>,
+    settings: Settings,
+    set_timeout: Entity<InputState>,
+    set_history_cap: Entity<InputState>,
+    set_proxy: Entity<InputState>,
+    set_verify_tls: bool,
     confirm_clear: bool,
     /// Environment export includes secret values (off by default, FR-ENV-04).
     export_secrets: bool,
@@ -114,6 +123,10 @@ impl Workspace {
             Ok(s) => (Some(s), None),
             Err(e) => (None, Some(e.to_string())),
         };
+        let settings = store
+            .as_ref()
+            .map(|s| s.load_settings())
+            .unwrap_or_default();
         let (cookies, cookie_note) = match &store {
             Some(s) => match CookieJar::load(&s.data_dir().join("cookies.json")) {
                 Ok(j) => (j, None),
@@ -127,7 +140,9 @@ impl Workspace {
             None => (CookieJar::new(), None),
         };
         let (history, hist_error) = match &store {
-            Some(s) => match History::open(&s.data_dir().join("history.db")) {
+            Some(s) => match History::open(&s.data_dir().join("history.db"))
+                .map(|h| h.with_limits(settings.history_cap, DEFAULT_MAX_BODY))
+            {
                 Ok(h) => (Some(Arc::new(Mutex::new(h))), None),
                 Err(e) => (None, Some(format!("History is off: {e}"))),
             },
@@ -138,6 +153,18 @@ impl Workspace {
         };
         let hist_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search URL or name"));
+        let palette_query =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Type a command\u{2026}"));
+        let set_timeout = cx.new(|cx| {
+            InputState::new(window, cx).default_value(settings.default_timeout_ms.to_string())
+        });
+        let set_history_cap = cx
+            .new(|cx| InputState::new(window, cx).default_value(settings.history_cap.to_string()));
+        let set_proxy = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.proxy.clone())
+                .placeholder("http://host:port (blank for none)")
+        });
         let sub = cx.subscribe_in(
             &hist_search,
             window,
@@ -146,6 +173,15 @@ impl Workspace {
                     this.refresh_history(cx);
                     cx.notify();
                 }
+            },
+        );
+        let palette_sub = cx.subscribe_in(
+            &palette_query,
+            window,
+            |this, _state, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => this.palette_filter(cx),
+                InputEvent::PressEnter { .. } => this.palette_confirm(window, cx),
+                _ => {}
             },
         );
         let (session, session_note, session_enabled) = match &store {
@@ -165,6 +201,10 @@ impl Workspace {
             None => (None, None, false),
         };
         let mut first = RequestTab::create(0, false, window, cx);
+        first.verify_tls = settings.verify_tls;
+        first.timeout.update(cx, |s, cx| {
+            s.set_value(settings.default_timeout_ms.to_string(), window, cx)
+        });
         if let Some(e) = &store_err {
             first.status = Status::Error(e.clone());
         }
@@ -191,6 +231,13 @@ impl Workspace {
             hist_items: Vec::new(),
             hist_search,
             hist_error,
+            palette_query,
+            palette: None,
+            set_timeout,
+            set_history_cap,
+            set_proxy,
+            set_verify_tls: settings.verify_tls,
+            settings,
             confirm_clear: false,
             export_secrets: false,
             code_lang: Lang::Curl,
@@ -217,7 +264,7 @@ impl Workspace {
                 notes: Vec::new(),
                 copied: false,
             },
-            _subs: vec![sub, appearance],
+            _subs: vec![sub, appearance, palette_sub],
         };
         me.refresh_sidebar();
         me.reload_envs();
@@ -270,7 +317,9 @@ impl Workspace {
 
     /// Show a message where the user is looking: the environments page or the active tab.
     pub(crate) fn notice(&mut self, s: Status) {
-        if self.main_view == MainView::Environments {
+        // On a page other than the request view the tab's status is not on screen, so the
+        // message goes to the workspace status, which the page and the status bar show.
+        if self.main_view != MainView::Request {
             self.status = s;
         } else {
             self.tab_mut().status = s;

@@ -1,4 +1,6 @@
-//! Import/export (FR-IMP): Postman Collection v2.0/v2.1, Postman environments and globals.
+//! Import/export (FR-IMP): Postman Collection v2.0/v2.1, Postman environments and globals,
+//! HAR logs and the app's own native JSON. `import_any` is the single entry point that
+//! recognises which one a file is.
 //!
 //! Parsing is deliberately tolerant (`serde_json::Value`, every field optional) because real
 //! Postman exports vary a lot. Anything we can't represent is skipped and reported as a
@@ -12,6 +14,13 @@ use at_core::{
 use at_store::{Node, Store, StoreError};
 use serde_json::{json, Map, Value};
 
+mod detect;
+pub use detect::import_any;
+mod har;
+pub use har::import_har;
+mod native_json;
+pub use native_json::{export_json, import_json};
+
 pub const POSTMAN_SCHEMA_V21: &str =
     "https://schema.getpostman.com/json/collection/v2.1.0/collection.json";
 
@@ -21,7 +30,7 @@ pub enum InteropError {
     Json(#[from] serde_json::Error),
     #[error("this is a Postman v1 collection; open it in Postman and export it as v2.1")]
     PostmanV1,
-    #[error("not a Postman collection, environment or globals file")]
+    #[error("not a recognised import file: expected a Postman collection, environment or globals export, a HAR file, or a native JSON collection")]
     Unknown,
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -30,13 +39,13 @@ pub enum InteropError {
 /// A collection tree, independent of where it lives.
 // Trees are small and short-lived (import/export only); boxing every request would add noise.
 #[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Item {
     Folder { name: String, items: Vec<Item> },
     Request(Request),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Collection {
     pub name: String,
     pub items: Vec<Item>,

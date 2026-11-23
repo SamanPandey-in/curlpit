@@ -8,6 +8,7 @@
 //! and `sidebar` the state of the features named.
 
 mod actions;
+mod commands;
 mod editor;
 mod format;
 mod request_tab;
@@ -21,7 +22,8 @@ mod ui;
 mod workspace;
 
 use crate::actions::{
-    CloseTab, FindInResponse, NewTab, ReopenTab, SaveRequest, SendRequest, ToggleSidebar,
+    CloseTab, FindInResponse, NewTab, PaletteDismiss, PaletteNext, PalettePrev, ReopenTab,
+    SaveRequest, SendRequest, ToggleCommandPalette, ToggleSidebar,
 };
 use crate::workspace::Workspace;
 use gpui::prelude::*;
@@ -62,6 +64,10 @@ fn main() {
                 "ctrl-f",
                 "ctrl-b",
             );
+            #[cfg(target_os = "macos")]
+            let (palette_key, palette_key2) = ("cmd-k", "cmd-shift-p");
+            #[cfg(not(target_os = "macos"))]
+            let (palette_key, palette_key2) = ("ctrl-k", "ctrl-shift-p");
             cx.bind_keys([
                 KeyBinding::new(send_key, SendRequest, None),
                 KeyBinding::new(save_key, SaveRequest, None),
@@ -71,6 +77,11 @@ fn main() {
                 KeyBinding::new(find_key, FindInResponse, None),
                 // Zed's binding for the left dock.
                 KeyBinding::new(side_key, ToggleSidebar, None),
+                KeyBinding::new(palette_key, ToggleCommandPalette, None),
+                KeyBinding::new(palette_key2, ToggleCommandPalette, None),
+                KeyBinding::new("up", PalettePrev, Some("Palette")),
+                KeyBinding::new("down", PaletteNext, Some("Palette")),
+                KeyBinding::new("escape", PaletteDismiss, Some("Palette")),
             ]);
             // A comfortable default, but never larger than the screen: a fixed size taller than
             // a 768 px laptop display put the title bar above the top edge, out of reach.

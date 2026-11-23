@@ -7,8 +7,8 @@ use crate::sidebar::{ItemKind, MainView, Scope, SideView};
 use crate::ui::Status;
 use crate::workspace::{merge_vars, Workspace};
 use at_interop::{
-    export_collection, export_environment, import_postman, read_collection, write_collection,
-    Imported,
+    export_collection, export_environment, export_json, import_any, read_collection,
+    write_collection, Imported,
 };
 use at_store::slug;
 use gpui::{Context, PathPromptOptions, Window};
@@ -61,23 +61,38 @@ impl Workspace {
         .detach();
     }
 
-    /// Import a Postman collection, environment or globals file (the kind is detected).
+    /// Import a Postman, HAR or native JSON file; the kind is detected from its contents.
     pub(crate) fn import_file(
         &mut self,
         path: &std::path::Path,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let imported = std::fs::read_to_string(path)
-            .map_err(|e| e.to_string())
-            .and_then(|t| import_postman(&t).map_err(|e| e.to_string()));
-        let imported = match imported {
-            Ok(i) => i,
+        match std::fs::read_to_string(path) {
+            Ok(text) => self.import_text(&text, &path.display().to_string(), window, cx),
             Err(e) => {
                 self.notice(Status::Error(format!(
                     "Could not import {}: {e}",
                     path.display()
                 )));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Import collection, environment or globals text from any source — a file, a drop or the
+    /// clipboard. The format is detected; malformed input is an error, never a crash (FR-IE-09).
+    pub(crate) fn import_text(
+        &mut self,
+        text: &str,
+        source: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let imported = match import_any(text) {
+            Ok(i) => i,
+            Err(e) => {
+                self.notice(Status::Error(format!("Could not import {source}: {e}")));
                 cx.notify();
                 return;
             }
@@ -162,6 +177,32 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Import every file dropped onto the window (FR-IE-09 drag and drop).
+    pub(crate) fn import_dropped(
+        &mut self,
+        paths: &[std::path::PathBuf],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for path in paths {
+            self.import_file(path, window, cx);
+        }
+    }
+
+    /// Import the collection, environment or globals text on the clipboard (FR-IE-09 paste).
+    pub(crate) fn import_from_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = cx
+            .read_from_clipboard()
+            .and_then(|c| c.text())
+            .unwrap_or_default();
+        if text.trim().is_empty() {
+            self.notice(Status::Error("The clipboard is empty".into()));
+            cx.notify();
+            return;
+        }
+        self.import_text(&text, "clipboard", window, cx);
+    }
+
     pub(crate) fn on_export_collection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((name, dir)) = self.selected_collection() else {
             self.notice(Status::Error(
@@ -186,6 +227,40 @@ impl Workspace {
             text,
             file,
             format!("Exported collection \"{name}\""),
+            warnings,
+            window,
+            cx,
+        );
+    }
+
+    /// Export the selected collection as our native JSON (FR-IE-06).
+    pub(crate) fn on_export_collection_json(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((name, dir)) = self.selected_collection() else {
+            self.notice(Status::Error(
+                "Click a collection in the sidebar (or open one of its requests) to choose what to export"
+                    .into(),
+            ));
+            cx.notify();
+            return;
+        };
+        let (col, warnings) = match read_collection(&name, &dir) {
+            Ok(x) => x,
+            Err(e) => {
+                self.notice(Status::Error(e.to_string()));
+                cx.notify();
+                return;
+            }
+        };
+        let text = export_json(&col);
+        let file = format!("{}.json", slug(&name));
+        self.save_export(
+            text,
+            file,
+            format!("Exported collection \"{name}\" as JSON"),
             warnings,
             window,
             cx,
@@ -269,7 +344,7 @@ impl Workspace {
             MainView::Environments => self.close_envs(cx),
             // the runner keeps running in the background; its page can be reopened
             MainView::Runner | MainView::Cookies => self.main_view = MainView::Request,
-            MainView::Request => {}
+            MainView::Request | MainView::Settings => {}
         }
         self.main_view == MainView::Request
     }

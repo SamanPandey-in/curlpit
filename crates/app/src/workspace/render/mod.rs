@@ -12,14 +12,17 @@ mod code;
 mod cookies;
 mod env_page;
 mod kv;
+mod palette;
 mod runner;
 mod scripts;
 mod settings;
+mod settings_page;
 mod side;
 mod tree;
 
 use crate::actions::{
-    CloseTab, FindInResponse, NewTab, ReopenTab, SaveRequest, SendRequest, ToggleSidebar,
+    CloseTab, FindInResponse, NewTab, PaletteDismiss, PaletteNext, PalettePrev, ReopenTab,
+    SaveRequest, SendRequest, ToggleCommandPalette, ToggleSidebar,
 };
 use crate::editor::{next_method, AuthKind, ReqTab, Which};
 use crate::format::{body_label, human};
@@ -35,7 +38,7 @@ use at_core::lines::{build_rows, CONT};
 use at_core::Method;
 use gpui::prelude::*;
 use gpui::{
-    div, px, uniform_list, AnyElement, ClipboardItem, Context, Focusable as _, Hsla,
+    div, px, uniform_list, AnyElement, ClipboardItem, Context, ExternalPaths, Focusable as _, Hsla,
     ScrollWheelEvent, Window,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
@@ -768,6 +771,7 @@ impl Render for Workspace {
             MainView::Environments => self.render_env_page(cx).into_any_element(),
             MainView::Runner => self.render_runner(cx).into_any_element(),
             MainView::Cookies => self.render_cookies(cx).into_any_element(),
+            MainView::Settings => self.render_settings_page(cx).into_any_element(),
             MainView::Request => main_col.into_any_element(),
         };
 
@@ -807,6 +811,16 @@ impl Render for Workspace {
                 this.sidebar_open = !this.sidebar_open;
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
+                this.toggle_palette(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PaletteNext, _window, cx| this.palette_move(1, cx)))
+            .on_action(cx.listener(|this, _: &PalettePrev, _window, cx| this.palette_move(-1, cx)))
+            .on_action(cx.listener(|this, _: &PaletteDismiss, _window, cx| this.close_palette(cx)))
+            // Drop a collection, environment or HAR file anywhere to import it (FR-IE-09).
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.import_dropped(paths.paths(), window, cx)
+            }))
             .child(
                 div().flex_1().min_h_0().child(
                     h_resizable("side-split")
@@ -838,12 +852,14 @@ impl Render for Workspace {
         // on the caption never reaches the OS, so the window could not be dragged.
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(bg)
             .text_color(fg)
             .child(self.render_title_bar(cx))
             .child(workspace)
+            .when(self.palette.is_some(), |d| d.child(self.render_palette(cx)))
     }
 }
 
@@ -901,6 +917,7 @@ impl Workspace {
                     .child(hint("Save request", primary_key("s")))
                     .child(hint("Find in response", primary_key("f")))
                     .child(hint("Toggle sidebar", primary_key("b")))
+                    .child(hint("Command palette", primary_key("k")))
                     .into_any_element()
             }
         }

@@ -103,10 +103,34 @@ pub struct Settings {
     /// Name of the active environment, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_environment: Option<String>,
+    /// Default per-request timeout, in milliseconds.
+    #[serde(default = "default_timeout_ms")]
+    pub default_timeout_ms: u64,
+    /// Whether TLS certificates are verified on outgoing requests.
+    #[serde(default = "default_verify_tls")]
+    pub verify_tls: bool,
+    /// Maximum number of entries kept in request history.
+    #[serde(default = "default_history_cap")]
+    pub history_cap: usize,
+    /// Proxy URL to route requests through (empty string = no proxy).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proxy: String,
 }
 
 fn current_schema() -> u32 {
     SCHEMA_VERSION
+}
+
+fn default_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_verify_tls() -> bool {
+    true
+}
+
+fn default_history_cap() -> usize {
+    1000
 }
 
 impl Default for Settings {
@@ -114,6 +138,10 @@ impl Default for Settings {
         Self {
             schema_version: SCHEMA_VERSION,
             active_environment: None,
+            default_timeout_ms: 30_000,
+            verify_tls: true,
+            history_cap: 1000,
+            proxy: String::new(),
         }
     }
 }
@@ -1084,5 +1112,33 @@ mod tests {
         assert_eq!(store.load_settings().active_environment, None);
         fs::write(t.path().join("settings.toml"), "= =").unwrap();
         assert_eq!(store.load_settings(), Settings::default());
+    }
+
+    #[test]
+    fn settings_new_fields_roundtrip() {
+        let s = Settings {
+            default_timeout_ms: 5000,
+            verify_tls: false,
+            history_cap: 50,
+            proxy: "http://localhost:8080".into(),
+            ..Default::default()
+        };
+        let text = toml::to_string(&s).unwrap();
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn settings_old_format_gets_new_defaults() {
+        let old = r#"
+schema_version = 1
+active_environment = "Prod"
+"#;
+        let s: Settings = toml::from_str(old).unwrap();
+        assert_eq!(s.active_environment, Some("Prod".into()));
+        assert_eq!(s.default_timeout_ms, 30000);
+        assert!(s.verify_tls);
+        assert_eq!(s.history_cap, 1000);
+        assert_eq!(s.proxy, "");
     }
 }
