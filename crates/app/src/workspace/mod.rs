@@ -102,6 +102,8 @@ pub(crate) struct Workspace {
     /// Sidebar | main split. Held here rather than keyed by id so `render` can read the
     /// sidebar's current width, which the response viewer's wrap width depends on.
     side_split: Entity<ResizableState>,
+    /// Text width of the response viewer, measured from its last layout.
+    viewer_avail: f32,
     _subs: Vec<Subscription>,
 }
 
@@ -201,10 +203,7 @@ impl Workspace {
             None => (None, None, false),
         };
         let mut first = RequestTab::create(0, false, window, cx);
-        first.verify_tls = settings.verify_tls;
-        first.timeout.update(cx, |s, cx| {
-            s.set_value(settings.default_timeout_ms.to_string(), window, cx)
-        });
+        Self::seed_defaults(&mut first, &settings, window, cx);
         if let Some(e) = &store_err {
             first.status = Status::Error(e.clone());
         }
@@ -251,6 +250,7 @@ impl Workspace {
             confirm_clear_cookies: false,
             sidebar_open: true,
             side_split: cx.new(|_| ResizableState::default()),
+            viewer_avail: 0.0,
             runner: Runner {
                 target: None,
                 iterations: cx.new(|cx| InputState::new(window, cx).default_value("1")),
@@ -316,6 +316,22 @@ impl Workspace {
     }
 
     /// Show a message where the user is looking: the environments page or the active tab.
+    /// Give a blank request the app-wide defaults from the Settings screen (FR-SET-02):
+    /// the timeout and TLS verification every new tab starts with.
+    pub(crate) fn seed_defaults(
+        tab: &mut RequestTab,
+        settings: &at_store::Settings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        tab.verify_tls = settings.verify_tls;
+        let ms = settings.default_timeout_ms.to_string();
+        tab.timeout.update(cx, |s, cx| s.set_value(ms, window, cx));
+        // The defaults are where a blank request starts, not an edit: without this a
+        // fresh tab showed as unsaved and asked "Discard?" before it could be closed.
+        tab.saved = tab.current_request(cx);
+    }
+
     pub(crate) fn notice(&mut self, s: Status) {
         // On a page other than the request view the tab's status is not on screen, so the
         // message goes to the workspace status, which the page and the status bar show.

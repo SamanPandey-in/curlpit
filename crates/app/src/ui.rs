@@ -173,6 +173,12 @@ pub(crate) fn primary_key(rest: &str) -> String {
     }
 }
 
+/// `s` on one line: a message with line breaks (a TOML parse error, a script stack) shown
+/// in a one-line slot would otherwise draw its later lines over whatever sits below.
+pub(crate) fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// A binding as words for running text, e.g. `key_label("S")` is "Ctrl+S" (or "⌘S").
 pub(crate) fn key_label(key: &str) -> String {
     if cfg!(target_os = "macos") {
@@ -204,4 +210,22 @@ pub(crate) enum Status {
         size: u64,
     },
     Error(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::one_line;
+
+    #[test]
+    fn one_line_flattens_multi_line_messages() {
+        // A TOML parse error, as the session loader reports it.
+        let msg = "cannot read session.toml: TOML parse error at line 1, column 1\n  |\n1 | = =\n  | ^\ninvalid key\n";
+        let flat = one_line(msg);
+        assert!(!flat.contains('\n'), "{flat:?}");
+        assert_eq!(
+            flat,
+            "cannot read session.toml: TOML parse error at line 1, column 1 | 1 | = = | ^ invalid key"
+        );
+        assert_eq!(one_line("already one line"), "already one line");
+    }
 }

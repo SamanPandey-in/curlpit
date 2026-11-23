@@ -11,7 +11,10 @@ impl Workspace {
     pub(crate) fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        let tab = RequestTab::create(id, true, window, cx);
+        let mut tab = RequestTab::create(id, true, window, cx);
+        // New tabs start from the Settings screen's defaults, as the first one does; they
+        // used to get the built-in 30 s and TLS on whatever the user had chosen.
+        Self::seed_defaults(&mut tab, &self.settings, window, cx);
         // New requests go to the folder the current tab was using.
         let dir = self.tab().save_dir.clone();
         self.tabs.push(tab);

@@ -30,8 +30,8 @@ use crate::response::{row_spans, ResTab, Span, FIND_MAX};
 use crate::sidebar::MainView;
 use crate::theme::{Palette, BAR_H, ROW_PAD_Y, S1, S2, S3, SMALL_TEXT};
 use crate::ui::{
-    avail_width, char_w, icon_btn, kbd, key_label, mono, primary_key, quiet_btn, under_tab, Status,
-    GUTTER,
+    avail_width, char_w, icon_btn, kbd, key_label, mono, one_line, primary_key, quiet_btn,
+    under_tab, Status, GUTTER,
 };
 use crate::workspace::Workspace;
 use at_core::lines::{build_rows, CONT};
@@ -71,7 +71,37 @@ impl Render for Workspace {
         } else {
             0.0
         };
-        let avail = avail_width(window, side_w);
+        // The viewer's real width, as laid out last frame. Estimating it from the window and
+        // the sidebar drifted at small sizes (wrapped rows ran past the right edge), so the
+        // estimate is only the fallback before the list has been laid out once.
+        let measured = f32::from(
+            self.tab()
+                .list_scroll
+                .0
+                .borrow()
+                .base_handle
+                .bounds()
+                .size
+                .width,
+        );
+        let avail = if measured > GUTTER {
+            (measured - GUTTER - 12.0).max(50.0)
+        } else {
+            avail_width(window, side_w)
+        };
+        if (avail - self.viewer_avail).abs() > 0.5 {
+            // The width changed since the last frame: draw once more so wrapping and the
+            // scroll limits follow it without waiting for the next input.
+            self.viewer_avail = avail;
+            cx.notify();
+        }
+        // Pane width this frame (measured, or the window minus the sidebar before layout).
+        let pane_w = if measured > GUTTER {
+            measured
+        } else {
+            f32::from(window.viewport_size().width) - side_w
+        };
+        let compact = pane_w < 640.0;
         let cols = (((avail / char_w()).floor() as usize).saturating_sub(1)).max(10);
         {
             let tab = self.tab_mut();
@@ -123,10 +153,13 @@ impl Render for Workspace {
             .px(px(S2))
             .pt(px(S2))
             .child(
+                // A definite base width, not just flex-grow: measured from nothing on the
+                // first frame, the field laid its text out at a sliver and showed only "N"
+                // until something forced a relayout.
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .max_w(px(420.))
+                    .w(px(360.))
+                    .flex_shrink()
+                    .min_w(px(140.))
                     .child(Input::new(&tab.name).appearance(false).small()),
             )
             .child(div().flex_1())
@@ -329,7 +362,7 @@ impl Render for Workspace {
                         .min_w_0()
                         .truncate()
                         .text_color(muted)
-                        .child(m.clone()),
+                        .child(one_line(m)),
                 )
                 .into_any_element(),
             Status::Done {
@@ -356,7 +389,11 @@ impl Render for Workspace {
                             .child(format!("{code} {text}")),
                     )
                     .child(div().text_color(muted).child(format!("{ms} ms")))
-                    .child(div().text_color(muted).child(human(*size)))
+                    // A narrow pane can't fit tabs, actions and the whole outcome: the
+                    // size goes first, the status and time stay.
+                    .when(!compact, |d| {
+                        d.child(div().text_color(muted).child(human(*size)))
+                    })
                     .into_any_element()
             }
             Status::Error(e) => div()
@@ -367,7 +404,7 @@ impl Render for Workspace {
                 .min_w_0()
                 .text_color(p.status_error())
                 .child(Icon::new(IconName::CircleX).small().flex_none())
-                .child(div().flex_1().min_w_0().truncate().child(e.clone()))
+                .child(div().flex_1().min_w_0().truncate().child(one_line(e)))
                 .into_any_element(),
         };
 
@@ -428,7 +465,7 @@ impl Render for Workspace {
                 },
             ))
         };
-        let warning = tab.warning.clone().map(|w| {
+        let warning = tab.warning.as_deref().map(one_line).map(|w| {
             div()
                 .flex()
                 .flex_row()
@@ -726,23 +763,26 @@ impl Render for Workspace {
                     .font_family(mono())
                     .text_size(px(13.))
                     // horizontal scrolling is ours (so the gutter can stay put); vertical is the list's
-                    .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, window, cx| {
-                        let tab = this.tab_mut();
-                        if tab.wrap || tab.res_tab != ResTab::Body {
-                            return;
-                        }
-                        let d = ev.delta.pixel_delta(px(18.));
-                        let mut dx = f32::from(d.x);
-                        if dx == 0.0 && ev.modifiers.shift {
-                            dx = f32::from(d.y);
-                        }
-                        if dx == 0.0 {
-                            return;
-                        }
-                        let max = tab.max_scroll_x(avail_width(window, side_w));
-                        tab.scroll_x = (tab.scroll_x - dx).clamp(0.0, max);
-                        cx.notify();
-                    }))
+                    .on_scroll_wheel(cx.listener(
+                        move |this, ev: &ScrollWheelEvent, _window, cx| {
+                            let avail = this.viewer_avail;
+                            let tab = this.tab_mut();
+                            if tab.wrap || tab.res_tab != ResTab::Body {
+                                return;
+                            }
+                            let d = ev.delta.pixel_delta(px(18.));
+                            let mut dx = f32::from(d.x);
+                            if dx == 0.0 && ev.modifiers.shift {
+                                dx = f32::from(d.y);
+                            }
+                            if dx == 0.0 {
+                                return;
+                            }
+                            let max = tab.max_scroll_x(avail);
+                            tab.scroll_x = (tab.scroll_x - dx).clamp(0.0, max);
+                            cx.notify();
+                        },
+                    ))
                     .child(resp_area),
             );
 
@@ -890,7 +930,9 @@ impl Workspace {
                         .large()
                         .text_color(p.status_error()),
                 )
-                .child(div().text_color(p.text()).child("The request failed"))
+                // Not always a send: a startup problem (an unreadable session) lands here
+                // too, so the title doesn't claim a request failed.
+                .child(div().text_color(p.text()).child("Something went wrong"))
                 .child(
                     div()
                         .max_w(px(560.))

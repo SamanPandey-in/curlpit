@@ -317,12 +317,13 @@ impl Workspace {
     /// that are not a request on the right — Zed's place for panel toggles.
     pub(super) fn render_status_bar(&self, cx: &Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
-        // Workspace messages belong to the page that raised them (variables, settings,
-        // imports from a page); on the request view the tab's own status says what happened.
-        let note = match (
-            &self.status,
-            self.main_view == crate::sidebar::MainView::Request,
-        ) {
+        // Workspace messages (imports, saves) need a place on pages that don't show them
+        // themselves. The Variables and Settings pages print them in the page, and on the
+        // request view the tab's own status says what happened, so only Cookies and the
+        // Runner borrow the status bar.
+        use crate::sidebar::MainView as V;
+        let shows_own = matches!(self.main_view, V::Request | V::Environments | V::Settings);
+        let note = match (&self.status, shows_own) {
             (_, true) => None,
             (Status::Info(m), _) => Some((m.clone(), p.text_muted())),
             (Status::Error(e), _) => Some((e.clone(), p.status_error())),
