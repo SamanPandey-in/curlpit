@@ -10,6 +10,7 @@ use at_history::now_ms;
 use gpui::prelude::*;
 use gpui::{div, px, Context};
 use gpui_component::button::Button;
+use gpui_component::Sizable as _;
 
 impl Workspace {
     pub(crate) fn render_cookies(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -17,45 +18,34 @@ impl Workspace {
         let (muted, border) = (p.text_muted(), p.border_variant());
         let cookies = self.cookies.list();
         let now = now_ms() / 1000;
-        let header = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .p_2()
-            .child(div().text_color(muted).child("COOKIES"))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_1()
-                    .children((!cookies.is_empty()).then(|| {
-                        Button::new("cookies-clear")
-                            .label(if self.confirm_clear_cookies {
-                                "Click again to delete all"
-                            } else {
-                                "Delete all"
-                            })
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                if this.confirm_clear_cookies {
-                                    this.confirm_clear_cookies = false;
-                                    this.cookies.clear();
-                                    this.save_cookies_if_changed();
-                                } else {
-                                    this.confirm_clear_cookies = true;
-                                }
-                                cx.notify();
-                            }))
+        let header = self.page_header(
+            "Cookies",
+            (!cookies.is_empty()).then(|| {
+                Button::new("cookies-clear")
+                    .small()
+                    .label(if self.confirm_clear_cookies {
+                        "Click again to delete all"
+                    } else {
+                        "Delete all"
+                    })
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        if this.confirm_clear_cookies {
+                            this.confirm_clear_cookies = false;
+                            this.cookies.clear();
+                            this.save_cookies_if_changed();
+                        } else {
+                            this.confirm_clear_cookies = true;
+                        }
+                        cx.notify();
                     }))
-                    .child(
-                        Button::new("cookies-back")
-                            .label("← Back to requests")
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.main_view = MainView::Request;
-                                cx.notify();
-                            })),
-                    ),
-            );
+                    .into_any_element()
+            }),
+            |this, _window, cx| {
+                this.main_view = MainView::Request;
+                cx.notify();
+            },
+            cx,
+        );
         let mut list = div()
             .id("cookie-list")
             .flex_1()
@@ -85,6 +75,7 @@ impl Workspace {
                         .child(div().child(ck.domain.clone()))
                         .child(
                             Button::new(("cookie-domain-clear", ix))
+                                .small()
                                 .label("Delete domain")
                                 .on_click(cx.listener(move |this, _ev, _window, cx| {
                                     this.cookies.clear_domain(&domain);
@@ -141,20 +132,19 @@ impl Workspace {
                             .child(expires_label(now, ck.expires)),
                     )
                     .child(div().w(px(120.)).flex_none().text_color(muted).child(flags))
-                    .child(
-                        Button::new(("cookie-del", ix))
-                            .label("✕")
-                            .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                this.cookies.remove(&d, &p, &n);
-                                this.save_cookies_if_changed();
-                                cx.notify();
-                            })),
-                    ),
+                    .child(Button::new(("cookie-del", ix)).small().label("✕").on_click(
+                        cx.listener(move |this, _ev, _window, cx| {
+                            this.cookies.remove(&d, &p, &n);
+                            this.save_cookies_if_changed();
+                            cx.notify();
+                        }),
+                    )),
             );
         }
         div()
             .flex_1()
-            .h_full()
+            .min_h_0()
+            .w_full()
             .flex()
             .flex_col()
             .child(header)

@@ -11,6 +11,7 @@ use gpui::prelude::*;
 use gpui::{div, px, ClipboardItem, Context};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::Input;
+use gpui_component::Sizable as _;
 
 impl Workspace {
     pub(crate) fn render_runner(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -19,24 +20,21 @@ impl Workspace {
         let (green, red) = (p.success_text(), p.status_error());
         let r = &self.runner;
         let running = r.cancel.is_some();
-        let header = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .p_2()
-            .child(div().text_color(muted).child("COLLECTION RUNNER"))
-            .child(
-                Button::new("run-back")
-                    .label("← Back to requests")
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.main_view = MainView::Request;
-                        cx.notify();
-                    })),
-            );
+        let header = self.page_header(
+            "Collection runner",
+            None,
+            |this, _window, cx| {
+                this.main_view = MainView::Request;
+                cx.notify();
+            },
+            cx,
+        );
         let target = match &r.target {
             Some((name, _)) => format!("Runs every request in \"{name}\", in sidebar order."),
-            None => "Click a collection or folder in the sidebar, then Run….".to_string(),
+            None => {
+                "Select a collection or folder in the sidebar, then choose Run… below the list."
+                    .to_string()
+            }
         };
         let options = div()
             .flex()
@@ -46,9 +44,9 @@ impl Workspace {
             .gap_2()
             .px_2()
             .child(div().text_color(muted).child("Iterations"))
-            .child(div().w(px(60.)).child(Input::new(&r.iterations)))
+            .child(div().w(px(60.)).child(Input::new(&r.iterations).small()))
             .child(div().text_color(muted).child("Delay (ms)"))
-            .child(div().w(px(80.)).child(Input::new(&r.delay)))
+            .child(div().w(px(80.)).child(Input::new(&r.delay).small()))
             .child(
                 seg_btn_ix(
                     "run-stop-fail",
@@ -68,6 +66,7 @@ impl Workspace {
             )
             .child(
                 Button::new("run-go")
+                    .small()
                     .primary()
                     .label(if running { "Stop" } else { "Run" })
                     .on_click(cx.listener(|this, _ev, _window, cx| {
@@ -80,6 +79,7 @@ impl Workspace {
             )
             .children((!r.rows.is_empty()).then(|| {
                 Button::new("run-copy")
+                    .small()
                     .label(if r.copied {
                         "Copied ✓"
                     } else {
@@ -206,19 +206,22 @@ impl Workspace {
 
         div()
             .flex_1()
-            .h_full()
+            .min_h_0()
+            .w_full()
             .flex()
             .flex_col()
             .gap_2()
             .child(header)
-            .child(div().px_2().child(target))
-            .child(options)
-            .children(
-                r.notes
-                    .iter()
-                    .map(|n| div().px_2().text_color(p.warning_text()).child(n.clone())),
-            )
-            .child(div().px_2().text_color(muted).child(progress))
-            .child(list)
+            .child(div().flex_none().px_2().child(target))
+            .child(options.flex_none())
+            .children(r.notes.iter().map(|n| {
+                div()
+                    .flex_none()
+                    .px_2()
+                    .text_color(p.warning_text())
+                    .child(n.clone())
+            }))
+            .child(div().flex_none().px_2().text_color(muted).child(progress))
+            .child(list.flex_1().min_h_0())
     }
 }

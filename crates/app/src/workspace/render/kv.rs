@@ -2,13 +2,17 @@
 
 use crate::editor::Which;
 use crate::request_tab::RequestTab;
+use crate::theme::{Palette, S1, S2, SMALL_TEXT};
+use crate::ui::{icon_btn, quiet_btn};
 use crate::workspace::Workspace;
 use gpui::prelude::*;
 use gpui::{div, px, Context};
-use gpui_component::button::Button;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::Input;
-use gpui_component::ActiveTheme as _;
+use gpui_component::{IconName, Sizable as _};
+
+/// Width of the enable column and of the delete column.
+const EDGE_W: f32 = 28.0;
 
 impl Workspace {
     pub(crate) fn render_kv(
@@ -22,60 +26,86 @@ impl Workspace {
             Which::Headers => (&tab.headers, "h-en", "h-del", "h-add"),
             Which::Form => (&tab.form, "f-en", "f-del", "f-add"),
         };
-        let muted = cx.theme().muted_foreground;
-        let mut col = div().flex().flex_col().gap_1().p_2().child(
-            div()
-                .flex()
-                .flex_row()
-                .gap_2()
-                .text_color(muted)
-                .child(div().w(px(24.)).flex_none())
-                .child(div().flex_1().child("Key"))
-                .child(div().flex_1().child("Value"))
-                .child(div().w(px(36.)).flex_none()),
-        );
+        let p = Palette::of(cx);
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .gap(px(S1))
+            .px(px(S2))
+            .py(px(S2))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(S2))
+                    .pb(px(2.))
+                    .text_size(px(SMALL_TEXT))
+                    .text_color(p.text_placeholder())
+                    .child(div().w(px(EDGE_W)).flex_none())
+                    .child(div().flex_1().pl(px(S2)).child("Key"))
+                    .child(div().flex_1().pl(px(S2)).child("Value"))
+                    .child(div().w(px(EDGE_W)).flex_none()),
+            );
         for (ix, row) in rows.iter().enumerate() {
             col = col.child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
+                    .gap(px(S2))
                     .child(
-                        div().w(px(24.)).flex_none().child(
-                            Checkbox::new((en_id, ix))
-                                .checked(row.enabled)
-                                .on_click(cx.listener(move |this, checked: &bool, _window, cx| {
+                        div()
+                            .w(px(EDGE_W))
+                            .flex_none()
+                            .flex()
+                            .justify_center()
+                            .child(Checkbox::new((en_id, ix)).checked(row.enabled).on_click(
+                                cx.listener(move |this, checked: &bool, _window, cx| {
                                     if let Some(r) = this.tab_mut().rows_mut(which).get_mut(ix) {
                                         r.enabled = *checked;
                                     }
                                     cx.notify();
-                                })),
-                        ),
+                                }),
+                            )),
                     )
-                    .child(div().flex_1().child(Input::new(&row.key)))
-                    .child(div().flex_1().child(Input::new(&row.value)))
-                    .child(div().w(px(36.)).flex_none().child(
-                        Button::new((del_id, ix)).label("✕").on_click(cx.listener(
-                            move |this, _ev, _window, cx| {
+                    // A disabled row stays editable but reads as switched off.
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .when(!row.enabled, |d| d.opacity(0.5))
+                            .child(Input::new(&row.key).small()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .when(!row.enabled, |d| d.opacity(0.5))
+                            .child(Input::new(&row.value).small()),
+                    )
+                    .child(div().w(px(EDGE_W)).flex_none().child(
+                        icon_btn((del_id, ix), IconName::Close, "Remove row", cx).on_click(
+                            cx.listener(move |this, _ev, _window, cx| {
                                 let rows = this.tab_mut().rows_mut(which);
                                 if ix < rows.len() {
                                     rows.remove(ix);
                                 }
                                 cx.notify();
-                            },
-                        )),
+                            }),
+                        ),
                     )),
             );
         }
         col.child(
-            div().child(Button::new(add_id).label("+ Add").on_click(cx.listener(
-                move |this, _ev, window, cx| {
-                    let row = Self::new_row(window, cx, "", "");
-                    this.tab_mut().rows_mut(which).push(row);
-                    cx.notify();
-                },
-            ))),
+            div().flex().pl(px(EDGE_W + S2 - S1)).child(
+                quiet_btn(add_id, "Add".to_string(), cx)
+                    .icon(IconName::Plus)
+                    .on_click(cx.listener(move |this, _ev, window, cx| {
+                        let row = Self::new_row(window, cx, "", "");
+                        this.tab_mut().rows_mut(which).push(row);
+                        cx.notify();
+                    })),
+            ),
         )
     }
 }

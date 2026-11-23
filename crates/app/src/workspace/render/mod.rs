@@ -1,10 +1,13 @@
-//! `Render for Workspace`: the window itself — tab bar, request editor, status row,
-//! response viewer and sidebar — assembled from the panel builders in the sibling
-//! modules. Everything that depends on the current window geometry is computed here,
-//! because only `render` is handed the `Window`.
+//! `Render for Workspace`: the window itself, assembled the way Zed assembles its own —
+//! title bar, a resizable sidebar beside the main pane, a status bar along the bottom —
+//! from the builders in the sibling modules (`chrome` for the bars, `side` for the
+//! sidebar). Inside the main pane the request editor and the response sit in a vertical
+//! split the user can drag. Everything that depends on the current window geometry is
+//! computed here, because only `render` is handed the `Window`.
 
 mod auth;
 mod body;
+mod chrome;
 mod code;
 mod cookies;
 mod env_page;
@@ -12,23 +15,39 @@ mod kv;
 mod runner;
 mod scripts;
 mod settings;
+mod side;
 mod tree;
 
-use crate::actions::{CloseTab, FindInResponse, NewTab, ReopenTab, SaveRequest, SendRequest};
+use crate::actions::{
+    CloseTab, FindInResponse, NewTab, ReopenTab, SaveRequest, SendRequest, ToggleSidebar,
+};
 use crate::editor::{next_method, AuthKind, ReqTab, Which};
 use crate::format::{body_label, human};
 use crate::response::{row_spans, ResTab, Span, FIND_MAX};
-use crate::sidebar::{ItemKind, MainView, SideView};
-use crate::theme::{Palette, ROW_PAD_Y, S1, S2, S3};
-use crate::ui::{avail_width, char_w, mono, quiet_btn, seg_btn, tab_btn, Status, GUTTER};
+use crate::sidebar::MainView;
+use crate::theme::{Palette, BAR_H, ROW_PAD_Y, S1, S2, S3, SMALL_TEXT};
+use crate::ui::{
+    avail_width, char_w, icon_btn, kbd, key_label, mono, primary_key, quiet_btn, under_tab, Status,
+    GUTTER,
+};
 use crate::workspace::Workspace;
 use at_core::lines::{build_rows, CONT};
-use at_history::{ago, now_ms};
+use at_core::Method;
 use gpui::prelude::*;
-use gpui::{div, px, uniform_list, ClipboardItem, Context, Hsla, ScrollWheelEvent, Window};
-use gpui_component::button::{Button, ButtonVariants};
+use gpui::{
+    div, px, uniform_list, AnyElement, ClipboardItem, Context, Focusable as _, Hsla,
+    ScrollWheelEvent, Window,
+};
+use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_component::input::Input;
+use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable};
+use gpui_component::spinner::Spinner;
+use gpui_component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _};
 use std::sync::Arc;
+
+/// Default sidebar width.
+const SIDE_W: f32 = 260.0;
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -37,8 +56,19 @@ impl Render for Workspace {
             self.focused_once = true;
         }
         self.ensure_tree();
-        // ---- viewer geometry (depends on the current window width) ----
-        let avail = avail_width(window);
+        // ---- viewer geometry (depends on the window width and the sidebar's) ----
+        let side_w = if self.sidebar_open {
+            self.side_split
+                .read(cx)
+                .sizes()
+                .first()
+                .map(|w| f32::from(*w))
+                .unwrap_or(SIDE_W)
+                + 1.0
+        } else {
+            0.0
+        };
+        let avail = avail_width(window, side_w);
         let cols = (((avail / char_w()).floor() as usize).saturating_sub(1)).max(10);
         {
             let tab = self.tab_mut();
@@ -78,120 +108,123 @@ impl Render for Workspace {
         let p = Palette::of(cx);
         let (bg, fg, muted) = (p.editor_background(), p.text(), p.text_muted());
         let in_flight = tab.cancel.is_some();
+        let clear = Hsla::transparent_black();
 
-        // ---- tab bar: one button per open request, ● marks unsaved changes ----
-        // The tab bar is chrome, so it takes the panel surface and the active tab is the
-        // pane showing through it, the way Zed's tabs read.
-        let mut tab_bar = div()
-            .id("tab-bar")
+        // ---- toolbar: the request's name, and what you can do with the request ----
+        let toolbar = div()
+            .flex_none()
             .flex()
             .flex_row()
             .items_center()
             .gap(px(S1))
             .px(px(S2))
-            .pt(px(S1))
-            .bg(p.surface())
-            .border_b_1()
-            .border_color(p.border())
-            .overflow_x_scroll();
-        for (ix, t) in self.tabs.iter().enumerate() {
-            let label = format!(
-                "{}{}{}",
-                if t.cancel.is_some() { "… " } else { "" },
-                if t.is_dirty(cx) { "● " } else { "" },
-                t.title(cx)
+            .pt(px(S2))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .max_w(px(420.))
+                    .child(Input::new(&tab.name).appearance(false).small()),
+            )
+            .child(div().flex_1())
+            .child(
+                quiet_btn("save", "Save".to_string(), cx)
+                    .tooltip(format!("Save request ({})", key_label("S")))
+                    .on_click(cx.listener(|this, _ev, window, cx| this.on_save(window, cx))),
+            )
+            .child(
+                icon_btn("copy-curl", IconName::Copy, "Copy as cURL", cx)
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.on_copy_curl(cx))),
             );
-            let b = tab_btn(("tab", ix), label, ix == self.active, cx);
-            tab_bar =
-                tab_bar.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_none()
-                        .child(b.on_click(cx.listener(move |this, _ev, window, cx| {
-                            this.activate_tab(ix, window, cx)
-                        })))
-                        .child(
-                            quiet_btn(
-                                ("tab-x", ix),
-                                if t.confirm_close { "Discard?" } else { "✕" }.to_string(),
-                                cx,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _ev, window, cx| this.close_tab(ix, window, cx),
-                            )),
-                        ),
-                );
-        }
-        tab_bar = tab_bar.child(
-            div().flex_none().child(
-                quiet_btn("tab-new", "+".to_string(), cx)
-                    .on_click(cx.listener(|this, _ev, window, cx| this.add_tab(window, cx))),
-            ),
-        );
-        tab_bar = tab_bar.child(
-            div().flex_none().child(
-                quiet_btn("tab-curl", "+ cURL".to_string(), cx)
-                    .on_click(cx.listener(|this, _ev, window, cx| this.on_paste_curl(window, cx))),
-            ),
-        );
 
-        let top = div()
+        // ---- URL bar: [METHOD v | url ............] [Send] ----
+        // The method and the URL share one field, as every HTTP client draws them; the
+        // field takes the focus ring when the URL input inside it is focused.
+        let url_focused = tab.url.read(cx).focus_handle(cx).is_focused(window);
+        let cur = tab.method;
+        let ws = cx.entity().downgrade();
+        let method_btn = Button::new("method")
+            .small()
+            .label(cur.as_str())
+            .dropdown_caret(true)
+            .custom(
+                ButtonCustomVariant::new(cx)
+                    .shadow(false)
+                    .color(clear)
+                    .border(clear)
+                    .foreground(p.method_color(cur.as_str()))
+                    .hover(p.element_hover())
+                    .active(p.element_selected()),
+            )
+            .dropdown_menu(move |menu, _window, _cx| {
+                let mut menu = menu.min_w(px(140.));
+                let mut m = Method::Get;
+                loop {
+                    let ws = ws.clone();
+                    let pick = m;
+                    menu = menu.item(
+                        PopupMenuItem::new(pick.as_str())
+                            .checked(pick == cur)
+                            .on_click(move |_, _, cx| {
+                                let _ = ws.update(cx, |this, cx| {
+                                    this.tab_mut().method = pick;
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                    m = next_method(m);
+                    if m == Method::Get {
+                        break menu;
+                    }
+                }
+            });
+        let send_tip = format!("Send request ({})", key_label("Enter"));
+        let send_btn = if in_flight {
+            Button::new("send").label("Cancel").outline()
+        } else {
+            Button::new("send").primary().label("Send")
+        };
+        let url_bar = div()
+            .flex_none()
             .flex()
             .flex_row()
             .items_center()
             .gap(px(S2))
             .p(px(S2))
-            .child(div().w(px(180.)).flex_none().child(Input::new(&tab.name)))
             .child(
-                Button::new("method")
-                    .label(tab.method.as_str())
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        let tab = this.tab_mut();
-                        tab.method = next_method(tab.method);
-                        cx.notify();
-                    })),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(32.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(if url_focused {
+                        p.border_focused()
+                    } else {
+                        p.border()
+                    })
+                    .bg(p.element_background())
+                    .child(div().flex_none().pl(px(3.)).child(method_btn))
+                    .child(div().flex_none().w(px(1.)).h(px(18.)).bg(p.border()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&tab.url).appearance(false)),
+                    ),
             )
-            .child(div().flex_1().child(Input::new(&tab.url)))
             .child(
-                Button::new("send")
-                    .primary()
-                    .label(if in_flight { "Cancel" } else { "Send" })
+                send_btn
+                    .h(px(32.))
+                    .px(px(S3 + S1))
+                    .tooltip(send_tip)
                     .on_click(cx.listener(|this, _ev, _window, cx| this.send_active(cx))),
-            )
-            .child(
-                Button::new("save")
-                    .label("Save")
-                    .on_click(cx.listener(|this, _ev, window, cx| this.on_save(window, cx))),
-            )
-            .child(
-                Button::new("copy-curl")
-                    .label("Copy cURL")
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.on_copy_curl(cx))),
-            )
-            .child(
-                Button::new("env-pick")
-                    .label(format!(
-                        "Env: {}",
-                        self.active_env
-                            .and_then(|i| self.envs.get(i))
-                            .map(|(e, _)| e.name.as_str())
-                            .unwrap_or("none")
-                    ))
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.cycle_env(cx))),
-            )
-            .child(
-                Button::new("env-manage")
-                    .label("Variables…")
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.open_envs(cx))),
-            )
-            .child(
-                Button::new("cookies-open")
-                    .label("Cookies")
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.open_cookies(cx))),
             );
 
-        // ---- request editor: tabs + panel ----
+        // ---- request editor: sub-tabs + panel ----
         let pcount = tab
             .params
             .iter()
@@ -202,147 +235,175 @@ impl Render for Workspace {
             .iter()
             .filter(|r| r.enabled && !r.key.read(cx).value().is_empty())
             .count();
+        let count = |n: usize| (n > 0).then(|| n.to_string());
+        let req_tab = |id: &'static str, label: String, badge: Option<String>, which: ReqTab| {
+            under_tab(id, label, badge, tab.req_tab == which, cx).on_click(cx.listener(
+                move |this, _ev, _window, cx| {
+                    this.tab_mut().req_tab = which;
+                    cx.notify();
+                },
+            ))
+        };
         let req_tabs = div()
+            .flex_none()
+            .h(px(BAR_H - 2.0))
             .flex()
             .flex_row()
-            .gap(px(S1))
-            .px(px(S2))
-            .child(
-                seg_btn(
-                    "t-params",
-                    format!("Params ({pcount})"),
-                    tab.req_tab == ReqTab::Params,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _ev, _window, cx| {
-                    this.tab_mut().req_tab = ReqTab::Params;
-                    cx.notify();
-                })),
-            )
-            .child(
-                seg_btn(
-                    "t-headers",
-                    format!("Headers ({hcount})"),
-                    tab.req_tab == ReqTab::Headers,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _ev, _window, cx| {
-                    this.tab_mut().req_tab = ReqTab::Headers;
-                    cx.notify();
-                })),
-            )
-            .child(
-                seg_btn(
-                    "t-body",
-                    body_label(tab.body_mode, tab.raw_kind),
-                    tab.req_tab == ReqTab::Body,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _ev, _window, cx| {
-                    this.tab_mut().req_tab = ReqTab::Body;
-                    cx.notify();
-                })),
-            )
-            .child(
-                seg_btn(
-                    "t-auth",
-                    match tab.auth_kind {
-                        AuthKind::None => "Auth".to_string(),
-                        k => format!("Auth ({})", k.label()),
-                    },
-                    tab.req_tab == ReqTab::Auth,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _ev, _window, cx| {
-                    this.tab_mut().req_tab = ReqTab::Auth;
-                    cx.notify();
-                })),
-            )
-            .child(
-                seg_btn(
-                    "t-scripts",
-                    if Self::has_scripts(tab, cx) {
-                        "Scripts ●".to_string()
-                    } else {
-                        "Scripts".to_string()
-                    },
-                    tab.req_tab == ReqTab::Scripts,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _ev, _window, cx| {
-                    this.tab_mut().req_tab = ReqTab::Scripts;
-                    cx.notify();
-                })),
-            )
-            .child(
-                seg_btn(
-                    "t-settings",
-                    "Settings".to_string(),
-                    tab.req_tab == ReqTab::Settings,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _ev, _window, cx| {
-                    this.tab_mut().req_tab = ReqTab::Settings;
-                    cx.notify();
-                })),
-            );
-        let req_panel =
-            div()
-                .id("req-panel")
-                .h(px(210.))
-                .overflow_y_scroll()
-                .child(match tab.req_tab {
-                    ReqTab::Params => self.render_kv(tab, Which::Params, cx).into_any_element(),
-                    ReqTab::Headers => self.render_kv(tab, Which::Headers, cx).into_any_element(),
-                    ReqTab::Body => self.render_body(tab, cx).into_any_element(),
-                    ReqTab::Auth => self.render_auth(tab, cx).into_any_element(),
-                    ReqTab::Scripts => self.render_scripts(tab, cx).into_any_element(),
-                    ReqTab::Settings => self.render_settings(tab, cx).into_any_element(),
-                });
+            .px(px(S1))
+            .border_b_1()
+            .border_color(p.border_variant())
+            .child(req_tab(
+                "t-params",
+                "Params".into(),
+                count(pcount),
+                ReqTab::Params,
+            ))
+            .child(req_tab(
+                "t-headers",
+                "Headers".into(),
+                count(hcount),
+                ReqTab::Headers,
+            ))
+            .child(req_tab(
+                "t-body",
+                body_label(tab.body_mode, tab.raw_kind),
+                None,
+                ReqTab::Body,
+            ))
+            .child(req_tab(
+                "t-auth",
+                "Auth".into(),
+                match tab.auth_kind {
+                    AuthKind::None => None,
+                    k => Some(k.label().to_string()),
+                },
+                ReqTab::Auth,
+            ))
+            .child(req_tab(
+                "t-scripts",
+                "Scripts".into(),
+                Self::has_scripts(tab, cx).then(|| "on".to_string()),
+                ReqTab::Scripts,
+            ))
+            .child(req_tab(
+                "t-settings",
+                "Settings".into(),
+                None,
+                ReqTab::Settings,
+            ));
+        let req_panel = div()
+            .id("req-panel")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .child(match tab.req_tab {
+                ReqTab::Params => self.render_kv(tab, Which::Params, cx).into_any_element(),
+                ReqTab::Headers => self.render_kv(tab, Which::Headers, cx).into_any_element(),
+                ReqTab::Body => self.render_body(tab, cx).into_any_element(),
+                ReqTab::Auth => self.render_auth(tab, cx).into_any_element(),
+                ReqTab::Scripts => self.render_scripts(tab, cx).into_any_element(),
+                ReqTab::Settings => self.render_settings(tab, cx).into_any_element(),
+            });
 
-        let (status_text, status_col): (String, Hsla) = match &tab.status {
-            Status::Idle => ("Ready".into(), muted),
-            Status::Loading => ("Sending…".into(), muted),
-            Status::Info(m) => (m.clone(), muted),
+        // ---- response header: view tabs on the left, the outcome on the right ----
+        let outcome: AnyElement = match &tab.status {
+            Status::Idle => div().into_any_element(),
+            Status::Loading => div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(S2))
+                .text_color(muted)
+                .child(Spinner::new().small().color(p.text_accent()))
+                .child("Sending…")
+                .into_any_element(),
+            Status::Info(m) => div()
+                .flex()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(muted)
+                        .child(m.clone()),
+                )
+                .into_any_element(),
             Status::Done {
                 code,
                 text,
                 ms,
                 size,
-            } => (
-                format!("{code} {text}   ·   {ms} ms   ·   {}", human(*size)),
-                p.status_class(*code),
-            ),
-            Status::Error(e) => (e.clone(), p.status_error()),
+            } => {
+                let col = p.status_class(*code);
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(S2 + 2.0))
+                    .font_family(mono())
+                    .text_size(px(SMALL_TEXT))
+                    .child(
+                        div()
+                            .px(px(6.))
+                            .py(px(1.))
+                            .rounded(px(3.))
+                            .bg(col.alpha(0.16))
+                            .text_color(col)
+                            .child(format!("{code} {text}")),
+                    )
+                    .child(div().text_color(muted).child(format!("{ms} ms")))
+                    .child(div().text_color(muted).child(human(*size)))
+                    .into_any_element()
+            }
+            Status::Error(e) => div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(S1 + 2.0))
+                .min_w_0()
+                .text_color(p.status_error())
+                .child(Icon::new(IconName::CircleX).small().flex_none())
+                .child(div().flex_1().min_w_0().truncate().child(e.clone()))
+                .into_any_element(),
         };
 
-        // The wrap toggle appears only when text overflows the window (or while wrap is on).
+        let has_body = tab.res_tab == ResTab::Body && tab.view.is_some();
+        // The wrap toggle appears only when text overflows the pane (or while wrap is on).
         let wrap_btn = (tab.res_tab == ResTab::Body && (tab.wrap || overflow)).then(|| {
-            quiet_btn(
-                "wrap",
-                if tab.wrap { "Wrap: on" } else { "Wrap: off" }.to_string(),
-                cx,
-            )
-            .on_click(cx.listener(|this, _ev, _window, cx| {
-                let tab = this.tab_mut();
-                tab.wrap = !tab.wrap;
-                tab.scroll_x = 0.0;
-                if !tab.wrap {
-                    if let Some(v) = tab.view.as_mut() {
-                        v.wrapped = None;
+            quiet_btn("wrap", "Wrap".to_string(), cx)
+                .selected(tab.wrap)
+                .xsmall()
+                .tooltip(if tab.wrap {
+                    "Soft wrap is on"
+                } else {
+                    "Soft wrap long lines"
+                })
+                .on_click(cx.listener(|this, _ev, _window, cx| {
+                    let tab = this.tab_mut();
+                    tab.wrap = !tab.wrap;
+                    tab.scroll_x = 0.0;
+                    if !tab.wrap {
+                        if let Some(v) = tab.view.as_mut() {
+                            v.wrapped = None;
+                        }
                     }
-                }
-                cx.notify();
-            }))
+                    cx.notify();
+                }))
         });
-
         // Copy the (pretty-printed) response body to the clipboard (FR-RES-01).
-        let copy_btn = (tab.res_tab == ResTab::Body && tab.view.is_some()).then(|| {
-            quiet_btn(
+        let copy_btn = has_body.then(|| {
+            icon_btn(
                 "copy",
-                if tab.copied { "Copied ✓" } else { "Copy" }.to_string(),
+                if tab.copied {
+                    IconName::Check
+                } else {
+                    IconName::Copy
+                },
+                "Copy response body",
                 cx,
             )
+            .xsmall()
             .on_click(cx.listener(|this, _ev, _window, cx| {
                 let tab = this.tab_mut();
                 if let Some(v) = &tab.view {
@@ -353,117 +414,107 @@ impl Render for Workspace {
                 }
             }))
         });
-
-        // The status row divides the request editor from the response, so it gets the
-        // panel surface and a hairline on each side rather than floating between them.
-        let status_row = div()
+        let res_tab = |id: &'static str, label: String, badge: Option<String>, which: ResTab| {
+            under_tab(id, label, badge, tab.res_tab == which, cx).on_click(cx.listener(
+                move |this, _ev, _window, cx| {
+                    this.tab_mut().res_tab = which;
+                    if which == ResTab::Code {
+                        this.code_copied = false;
+                    }
+                    cx.notify();
+                },
+            ))
+        };
+        let warning = tab.warning.clone().map(|w| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(S1))
+                .min_w_0()
+                .text_size(px(SMALL_TEXT))
+                .text_color(p.warning_text())
+                .child(Icon::new(IconName::TriangleAlert).xsmall())
+                .child(div().truncate().child(w))
+        });
+        let resp_header = div()
+            .flex_none()
+            .h(px(BAR_H - 2.0))
             .flex()
             .flex_row()
             .items_center()
-            .justify_between()
-            .px(px(S3))
-            .py(px(ROW_PAD_Y))
+            .pl(px(S1))
+            .pr(px(S3))
+            .gap(px(S2))
             .bg(p.surface())
-            .border_t_1()
             .border_b_1()
             .border_color(p.border())
             .child(
                 div()
+                    .flex_none()
+                    .h_full()
                     .flex()
                     .flex_row()
-                    .gap(px(S3))
-                    .child(div().text_color(status_col).child(status_text))
-                    .children(
-                        tab.warning
-                            .clone()
-                            .map(|w| div().text_color(p.warning_text()).child(w)),
-                    ),
+                    .child(res_tab("r-body", "Body".into(), None, ResTab::Body))
+                    .child(res_tab("r-tree", "Tree".into(), None, ResTab::Tree))
+                    .child(res_tab(
+                        "r-headers",
+                        "Headers".into(),
+                        count(tab.resp_headers.len()),
+                        ResTab::Headers,
+                    ))
+                    .child(res_tab(
+                        "r-tests",
+                        tab.report
+                            .as_ref()
+                            .map(|r| r.label())
+                            .unwrap_or_else(|| "Tests".to_string()),
+                        None,
+                        ResTab::Tests,
+                    ))
+                    .child(res_tab("r-code", "Code".into(), None, ResTab::Code)),
             )
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .gap(px(S1))
-                    .child(
-                        seg_btn(
-                            "r-body",
-                            "Body".to_string(),
-                            tab.res_tab == ResTab::Body,
-                            cx,
-                        )
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.tab_mut().res_tab = ResTab::Body;
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        seg_btn(
-                            "r-tree",
-                            "Tree".to_string(),
-                            tab.res_tab == ResTab::Tree,
-                            cx,
-                        )
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.tab_mut().res_tab = ResTab::Tree;
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        seg_btn(
-                            "r-headers",
-                            format!("Headers ({})", tab.resp_headers.len()),
-                            tab.res_tab == ResTab::Headers,
-                            cx,
-                        )
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.tab_mut().res_tab = ResTab::Headers;
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        seg_btn(
-                            "r-tests",
-                            tab.report
-                                .as_ref()
-                                .map(|r| r.label())
-                                .unwrap_or_else(|| "Tests".to_string()),
-                            tab.res_tab == ResTab::Tests,
-                            cx,
-                        )
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.tab_mut().res_tab = ResTab::Tests;
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        seg_btn(
-                            "r-code",
-                            "Code".to_string(),
-                            tab.res_tab == ResTab::Code,
-                            cx,
-                        )
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            this.tab_mut().res_tab = ResTab::Code;
-                            this.code_copied = false;
-                            cx.notify();
-                        })),
-                    )
-                    .children(copy_btn)
-                    .children(
-                        (tab.res_tab == ResTab::Body && tab.view.is_some()).then(|| {
-                            quiet_btn("save-body", "Save…".to_string(), cx).on_click(
-                                cx.listener(|this, _ev, window, cx| this.on_save_body(window, cx)),
-                            )
-                        }),
-                    )
-                    .children(
-                        (tab.res_tab == ResTab::Body && tab.view.is_some()).then(|| {
-                            quiet_btn("find-open", "Find".to_string(), cx).on_click(
+                    .items_center()
+                    .gap(px(2.))
+                    .children(has_body.then(|| {
+                        icon_btn("find-open", IconName::Search, "Find in response", cx)
+                            .xsmall()
+                            .on_click(
                                 cx.listener(|this, _ev, window, cx| this.open_find(window, cx)),
                             )
-                        }),
-                    )
+                    }))
+                    .children(copy_btn)
+                    .children(has_body.then(|| {
+                        icon_btn(
+                            "save-body",
+                            IconName::ArrowDown,
+                            "Save response to a file",
+                            cx,
+                        )
+                        .xsmall()
+                        .on_click(
+                            cx.listener(|this, _ev, window, cx| this.on_save_body(window, cx)),
+                        )
+                    }))
                     .children(wrap_btn),
+            )
+            // Warning and outcome share the rest of the bar and are what gives way when
+            // it is narrow: they shrink and ellipsize instead of running off the edge.
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(S3))
+                    .children(warning)
+                    .child(div().flex_shrink().min_w_0().max_w(px(520.)).child(outcome)),
             );
 
         let viewer = match &tab.view {
@@ -482,8 +533,7 @@ impl Render for Workspace {
                 // pass, so it cannot look the theme up for itself.
                 let (hit_bg, cur_bg, hit_fg) =
                     (p.find_match_bg(), p.find_current_bg(), p.find_match_fg());
-                let (row_bg, gutter_fg, rule) =
-                    (p.find_row_bg(), p.gutter_text(), p.border_variant());
+                let (row_bg, gutter_fg) = (p.find_row_bg(), p.gutter_text());
                 let (hits, hit_len, cur_hit) = if tab.find_open {
                     (
                         tab.matches.clone(),
@@ -527,10 +577,12 @@ impl Render for Workspace {
                                     div()
                                         .w(px(GUTTER))
                                         .flex_none()
-                                        .px(px(S2))
+                                        .flex()
+                                        .justify_end()
+                                        // Zed's gutter: numbers right-aligned against the
+                                        // text, no rule, so the eye runs straight across.
+                                        .pr(px(S3 + S1))
                                         .text_color(gutter_fg)
-                                        .border_r_1()
-                                        .border_color(rule)
                                         .child(label),
                                 )
                                 .child(
@@ -564,11 +616,7 @@ impl Render for Workspace {
                 .h_full()
                 .into_any_element()
             }
-            None => div()
-                .p(px(S3))
-                .text_color(p.text_placeholder())
-                .child("Send a request to see the response")
-                .into_any_element(),
+            None => self.render_empty_response(cx),
         };
 
         let find_bar =
@@ -593,7 +641,7 @@ impl Render for Workspace {
                     .bg(p.surface())
                     .border_b_1()
                     .border_color(p.border())
-                    .child(div().w(px(260.)).child(Input::new(&tab.find)))
+                    .child(div().w(px(260.)).child(Input::new(&tab.find).small()))
                     .child(div().w(px(90.)).text_color(muted).child(count))
                     .child(quiet_btn("find-prev", "↑".to_string(), cx).on_click(
                         cx.listener(move |this, _ev, _window, cx| this.find_step(id, -1, cx)),
@@ -654,243 +702,28 @@ impl Render for Workspace {
             ResTab::Code => self.render_code(cx).into_any_element(),
         };
 
-        let mut side_list = div()
-            .id("sidebar-list")
-            .flex_1()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col();
-        if self.items.is_empty() {
-            side_list = side_list.child(
-                div()
-                    .p(px(S2))
-                    .text_color(p.text_placeholder())
-                    .child("No collections yet. Press + or just Save a request."),
-            );
-        }
-        for (ix, item) in self.items.iter().enumerate() {
-            let selected = match item.kind {
-                ItemKind::Request => tab.current_path.as_ref() == Some(&item.path),
-                ItemKind::Collection | ItemKind::Folder => {
-                    tab.current_path.is_none() && tab.save_dir.as_ref() == Some(&item.path)
-                }
-                ItemKind::Broken(_) => false,
-            };
-            let (prefix, color) = match item.kind {
-                ItemKind::Collection => ("▾ ", fg),
-                ItemKind::Folder => ("▸ ", fg),
-                ItemKind::Request => ("", fg),
-                ItemKind::Broken(_) => ("⚠ ", p.status_error()),
-            };
-            side_list = side_list.child(
-                div()
-                    .id(("side", ix))
-                    .w_full()
-                    .py(px(S1))
-                    .pl(px(S2 + item.depth as f32 * 14.0))
-                    .pr(px(S2))
-                    .text_color(color)
-                    .cursor_pointer()
-                    // transparent, not the window colour: the sidebar has a surface of its own
-                    .bg(if selected {
-                        p.element_selected()
-                    } else {
-                        Hsla::transparent_black()
-                    })
-                    .child(format!("{prefix}{}", item.label))
-                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                        this.on_sidebar_click(ix, window, cx)
-                    })),
-            );
-        }
-        let side_head = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(S1))
-            .p(px(S2))
-            .border_b_1()
-            .border_color(p.border())
-            .child(
-                seg_btn(
-                    "side-col",
-                    "Collections".to_string(),
-                    self.side_view == SideView::Collections,
-                    cx,
-                )
-                .on_click(
-                    cx.listener(|this, _ev, _window, cx| this.show_side(SideView::Collections, cx)),
-                ),
-            )
-            .child(
-                seg_btn(
-                    "side-hist",
-                    "History".to_string(),
-                    self.side_view == SideView::History,
-                    cx,
-                )
-                .on_click(
-                    cx.listener(|this, _ev, _window, cx| this.show_side(SideView::History, cx)),
-                ),
-            )
-            .child(div().flex_1())
-            .children((self.side_view == SideView::Collections).then(|| {
-                quiet_btn("new-col", "+".to_string(), cx)
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.on_new_collection(cx)))
-            }));
-
-        let mut sidebar = div()
-            .w(px(260.))
-            .flex_none()
-            .h_full()
+        let request_pane = div()
+            .size_full()
             .flex()
             .flex_col()
-            .bg(p.surface())
-            .border_r_1()
-            .border_color(p.border())
-            .child(side_head);
-        sidebar = match self.side_view {
-            SideView::Collections => sidebar.child(side_list).child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(S1))
-                    .p(px(S2))
-                    .border_t_1()
-                    .border_color(p.border())
-                    .child(
-                        Button::new("col-import").label("Import…").on_click(
-                            cx.listener(|this, _ev, window, cx| this.on_import(window, cx)),
-                        ),
-                    )
-                    .child(Button::new("col-export").label("Export…").on_click(
-                        cx.listener(|this, _ev, window, cx| this.on_export_collection(window, cx)),
-                    ))
-                    .child(
-                        Button::new("col-run")
-                            .label(if self.runner.cancel.is_some() {
-                                "Run… ●"
-                            } else {
-                                "Run…"
-                            })
-                            .on_click(cx.listener(|this, _ev, _window, cx| this.open_runner(cx))),
-                    ),
-            ),
-            SideView::History => {
-                let now = now_ms();
-                let mut list = div()
-                    .id("hist-list")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col();
-                if self.history.is_some() && self.hist_items.is_empty() {
-                    let empty = if self.hist_search.read(cx).value().trim().is_empty() {
-                        "No requests yet. Everything you send appears here."
-                    } else {
-                        "No matches."
-                    };
-                    list = list.child(
-                        div()
-                            .p(px(S2))
-                            .text_color(p.text_placeholder())
-                            .child(empty),
-                    );
-                }
-                for (ix, s) in self.hist_items.iter().enumerate() {
-                    let (code, code_col) = match s.status {
-                        Some(n) => (n.to_string(), p.status_class(n)),
-                        None => ("ERR".to_string(), p.status_error()),
-                    };
-                    let id = s.id;
-                    list = list.child(
-                        div()
-                            .id(("hist", ix))
-                            .w_full()
-                            .px(px(S2))
-                            .py(px(S1))
-                            .cursor_pointer()
-                            .flex()
-                            .flex_col()
-                            .border_b_1()
-                            .border_color(p.border_variant())
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .gap(px(S2))
-                                    .child(s.method.clone())
-                                    .child(div().text_color(code_col).child(code))
-                                    .child(div().flex_1())
-                                    .child(div().text_color(muted).child(ago(now, s.ts_ms))),
-                            )
-                            .child(div().w_full().text_color(muted).truncate().child(
-                                if s.url.is_empty() {
-                                    "(no URL)".to_string()
-                                } else {
-                                    s.url.clone()
-                                },
-                            ))
-                            .on_click(cx.listener(move |this, _ev, window, cx| {
-                                this.open_history(id, window, cx)
-                            })),
-                    );
-                }
-                let tools = div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(S1))
-                    .px(px(S2))
-                    .pb(px(S2))
-                    .child(div().flex_1().child(Input::new(&self.hist_search)))
-                    .child(
-                        Button::new("hist-clear")
-                            .label(if self.confirm_clear {
-                                "Really clear?"
-                            } else {
-                                "Clear"
-                            })
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                if this.confirm_clear {
-                                    this.clear_history(cx);
-                                } else {
-                                    this.confirm_clear = true;
-                                    cx.notify();
-                                }
-                            })),
-                    );
-                sidebar
-                    .children(self.history.is_some().then_some(tools))
-                    .children(self.hist_error.clone().map(|e| {
-                        div()
-                            .px(px(S2))
-                            .pb(px(S2))
-                            .text_color(p.status_error())
-                            .child(e)
-                    }))
-                    .child(list)
-            }
-        };
-
-        let main_col = div()
-            .flex_1()
-            .h_full()
-            .flex()
-            .flex_col()
-            .child(tab_bar)
-            .child(top)
+            .bg(bg)
             .child(req_tabs)
-            .child(req_panel)
-            .child(status_row)
+            .child(req_panel);
+        let response_pane = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(bg)
+            .child(resp_header)
             .child(
                 div()
                     .flex_1()
+                    .min_h_0()
                     .overflow_hidden()
                     .font_family(mono())
                     .text_size(px(13.))
                     // horizontal scrolling is ours (so the gutter can stay put); vertical is the list's
-                    .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, cx| {
+                    .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, window, cx| {
                         let tab = this.tab_mut();
                         if tab.wrap || tab.res_tab != ResTab::Body {
                             return;
@@ -903,19 +736,48 @@ impl Render for Workspace {
                         if dx == 0.0 {
                             return;
                         }
-                        let max = tab.max_scroll_x(avail_width(window));
+                        let max = tab.max_scroll_x(avail_width(window, side_w));
                         tab.scroll_x = (tab.scroll_x - dx).clamp(0.0, max);
                         cx.notify();
                     }))
                     .child(resp_area),
             );
 
-        div()
+        let main_col = div()
             .size_full()
             .flex()
-            .flex_row()
+            .flex_col()
             .bg(bg)
-            .text_color(fg)
+            .child(self.render_tab_bar(cx))
+            .child(toolbar)
+            .child(url_bar)
+            .child(
+                div().flex_1().min_h_0().child(
+                    v_resizable("req-split")
+                        .child(
+                            resizable_panel()
+                                .size(px(230.))
+                                .size_range(px(80.)..px(2000.))
+                                .child(request_pane),
+                        )
+                        .child(resizable_panel().child(response_pane)),
+                ),
+            );
+
+        let main = match self.main_view {
+            MainView::Environments => self.render_env_page(cx).into_any_element(),
+            MainView::Runner => self.render_runner(cx).into_any_element(),
+            MainView::Cookies => self.render_cookies(cx).into_any_element(),
+            MainView::Request => main_col.into_any_element(),
+        };
+
+        // The workspace proper: everything below the title bar. It owns the key context
+        // and the focus, so the shortcuts work wherever focus is inside it.
+        let workspace = div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
             .key_context("Workspace")
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &SendRequest, _window, cx| this.send_active(cx)))
@@ -941,12 +803,106 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &SaveRequest, window, cx| this.on_save(window, cx)))
-            .child(sidebar)
-            .child(match self.main_view {
-                MainView::Environments => self.render_env_page(cx).into_any_element(),
-                MainView::Runner => self.render_runner(cx).into_any_element(),
-                MainView::Cookies => self.render_cookies(cx).into_any_element(),
-                MainView::Request => main_col.into_any_element(),
-            })
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _window, cx| {
+                this.sidebar_open = !this.sidebar_open;
+                cx.notify();
+            }))
+            .child(
+                div().flex_1().min_h_0().child(
+                    h_resizable("side-split")
+                        .with_state(&self.side_split)
+                        .child(
+                            resizable_panel()
+                                .size(px(SIDE_W))
+                                .size_range(px(180.)..px(520.))
+                                .visible(self.sidebar_open)
+                                .child(self.render_sidebar(cx)),
+                        )
+                        .child(
+                            resizable_panel().child(
+                                div()
+                                    .size_full()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .overflow_hidden()
+                                    .child(main),
+                            ),
+                        ),
+                ),
+            )
+            .child(self.render_status_bar(cx));
+
+        // The title bar sits outside the focus-tracking element on purpose. Focus tracking
+        // marks every mouse-down inside it as handled, and on Windows a handled mouse-down
+        // on the caption never reaches the OS, so the window could not be dragged.
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(bg)
+            .text_color(fg)
+            .child(self.render_title_bar(cx))
+            .child(workspace)
+    }
+}
+
+impl Workspace {
+    /// What the response pane shows before there is a response: the keys that drive the
+    /// app, the way Zed fills an empty pane — or, after a failed send, the whole error,
+    /// which the one-line outcome in the header can only show the start of.
+    fn render_empty_response(&self, cx: &Context<Self>) -> AnyElement {
+        let p = Palette::of(cx);
+        let ui_font = cx.theme().font_family.clone();
+        let tab = self.tab();
+        let center = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(S2))
+            .p(px(S3))
+            .font_family(ui_font);
+        match &tab.status {
+            Status::Loading => center
+                .child(Spinner::new().large().color(p.text_accent()))
+                .into_any_element(),
+            Status::Error(e) => center
+                .child(
+                    Icon::new(IconName::CircleX)
+                        .large()
+                        .text_color(p.status_error()),
+                )
+                .child(div().text_color(p.text()).child("The request failed"))
+                .child(
+                    div()
+                        .max_w(px(560.))
+                        .text_center()
+                        .text_color(p.text_muted())
+                        .child(e.clone()),
+                )
+                .into_any_element(),
+            _ => {
+                let hint = |label: &'static str, keys: String| {
+                    div()
+                        .w(px(260.))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(div().text_color(p.text_muted()).child(label))
+                        .child(kbd(&keys))
+                };
+                center
+                    .gap(px(S2 + 2.0))
+                    .child(hint("Send request", primary_key("enter")))
+                    .child(hint("New request", primary_key("t")))
+                    .child(hint("Save request", primary_key("s")))
+                    .child(hint("Find in response", primary_key("f")))
+                    .child(hint("Toggle sidebar", primary_key("b")))
+                    .into_any_element()
+            }
+        }
     }
 }

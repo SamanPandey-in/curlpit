@@ -12,6 +12,7 @@ use gpui_component::button::Button;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::Input;
 use gpui_component::ActiveTheme as _;
+use gpui_component::Sizable as _;
 
 impl Workspace {
     pub(crate) fn render_body(&self, tab: &RequestTab, cx: &Context<Self>) -> impl IntoElement {
@@ -97,6 +98,7 @@ impl Workspace {
         for (ix, row) in tab.multipart.iter().enumerate() {
             let choose = row.is_file.then(|| {
                 Button::new(("fd-choose", ix))
+                    .small()
                     .label("Choose…")
                     .on_click(cx.listener(move |this, _ev, window, cx| {
                         this.choose_form_file(id, ix, window, cx)
@@ -119,10 +121,11 @@ impl Workspace {
                                 }),
                             ),
                         ))
-                        .child(div().flex_1().child(Input::new(&row.key)))
+                        .child(div().flex_1().child(Input::new(&row.key).small()))
                         .child(
                             div().w(px(64.)).flex_none().child(
                                 Button::new(("fd-type", ix))
+                                    .small()
                                     .label(if row.is_file { "File" } else { "Text" })
                                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                                         if let Some(r) = this.tab_mut().multipart.get_mut(ix) {
@@ -138,40 +141,45 @@ impl Workspace {
                                 .flex()
                                 .flex_row()
                                 .gap_1()
-                                .child(div().flex_1().child(Input::new(&row.value)))
+                                .child(div().flex_1().child(Input::new(&row.value).small()))
                                 .children(choose),
                         )
-                        .child(div().w(px(36.)).flex_none().child(
-                            Button::new(("fd-del", ix)).label("✕").on_click(cx.listener(
-                                move |this, _ev, _window, cx| {
-                                    let rows = &mut this.tab_mut().multipart;
-                                    if ix < rows.len() {
-                                        rows.remove(ix);
-                                    }
-                                    cx.notify();
-                                },
-                            )),
-                        )),
+                        .child(
+                            div().w(px(36.)).flex_none().child(
+                                Button::new(("fd-del", ix)).small().label("✕").on_click(
+                                    cx.listener(move |this, _ev, _window, cx| {
+                                        let rows = &mut this.tab_mut().multipart;
+                                        if ix < rows.len() {
+                                            rows.remove(ix);
+                                        }
+                                        cx.notify();
+                                    }),
+                                ),
+                            ),
+                        ),
                 );
         }
         col.child(
-            div().child(Button::new("fd-add").label("+ Add").on_click(cx.listener(
-                |this, _ev, window, cx| {
-                    let row = Self::new_form_row(
-                        window,
-                        cx,
-                        &FormField {
-                            key: String::new(),
-                            value: FormValue::Text {
-                                value: String::new(),
+            div().child(
+                Button::new("fd-add")
+                    .small()
+                    .label("+ Add")
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        let row = Self::new_form_row(
+                            window,
+                            cx,
+                            &FormField {
+                                key: String::new(),
+                                value: FormValue::Text {
+                                    value: String::new(),
+                                },
+                                enabled: true,
                             },
-                            enabled: true,
-                        },
-                    );
-                    this.tab_mut().multipart.push(row);
-                    cx.notify();
-                },
-            ))),
+                        );
+                        this.tab_mut().multipart.push(row);
+                        cx.notify();
+                    })),
+            ),
         )
     }
 }

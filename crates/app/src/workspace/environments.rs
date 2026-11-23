@@ -60,13 +60,9 @@ impl Workspace {
         }
     }
 
-    /// Top-bar picker: none -> first environment -> ... -> none.
-    pub(crate) fn cycle_env(&mut self, cx: &mut Context<Self>) {
-        self.active_env = match self.active_env {
-            None if !self.envs.is_empty() => Some(0),
-            Some(i) if i + 1 < self.envs.len() => Some(i + 1),
-            _ => None,
-        };
+    /// Title-bar picker: choose an environment directly (`None` for no environment).
+    pub(crate) fn set_active_env(&mut self, ix: Option<usize>, cx: &mut Context<Self>) {
+        self.active_env = ix.filter(|&i| i < self.envs.len());
         self.persist_active();
         cx.notify();
     }

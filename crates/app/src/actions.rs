@@ -12,6 +12,7 @@ actions!(
         NewTab,
         CloseTab,
         ReopenTab,
-        FindInResponse
+        FindInResponse,
+        ToggleSidebar
     ]
 );

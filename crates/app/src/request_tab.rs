@@ -136,7 +136,11 @@ impl RequestTab {
                 vec![Workspace::new_row(window, cx, "hello", "world")],
             )
         };
-        let url = cx.new(|cx| InputState::new(window, cx).default_value(url_text));
+        let url = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Enter a URL, e.g. https://api.example.com/users")
+                .default_value(url_text)
+        });
         let body = cx.new(|cx| {
             InputState::new(window, cx)
                 .code_editor("json")

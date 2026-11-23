@@ -10,6 +10,7 @@ use gpui::{div, px, Context, Entity};
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputState};
 use gpui_component::ActiveTheme as _;
+use gpui_component::Sizable as _;
 
 impl Workspace {
     pub(crate) fn render_auth(&self, tab: &RequestTab, cx: &Context<Self>) -> impl IntoElement {
@@ -41,9 +42,10 @@ impl Workspace {
                 .items_center()
                 .gap_2()
                 .child(div().w(px(110.)).flex_none().text_color(muted).child(label))
-                .child(div().flex_1().child(Input::new(input)))
+                .child(div().flex_1().child(Input::new(input).small()))
         };
         let reveal = Button::new("auth-reveal")
+            .small()
             .label(if tab.auth_reveal { "Hide" } else { "Show" })
             .on_click(cx.listener(|this, _ev, window, cx| {
                 let tab = this.tab_mut();

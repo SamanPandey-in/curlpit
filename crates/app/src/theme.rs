@@ -29,6 +29,15 @@ pub(crate) const S2: f32 = 8.0;
 /// Two steps: the standard inset of a panel from the window edge.
 pub(crate) const S3: f32 = 12.0;
 
+/// The UI text size, and the rem every library control is measured in.
+pub(crate) const UI_TEXT: f32 = 14.0;
+/// Secondary text in chrome: counts, the status bar, hints.
+pub(crate) const SMALL_TEXT: f32 = 12.0;
+/// Height of a chrome bar (title, tab bar, toolbars), as Zed sizes its tab bar.
+pub(crate) const BAR_H: f32 = 34.0;
+/// Height of the bottom status bar.
+pub(crate) const STATUS_H: f32 = 26.0;
+
 /// Every row of chrome (tab bar, status row, find bar) is this tall before padding, so
 /// the stack of bars above the viewer lines up.
 pub(crate) const ROW_PAD_Y: f32 = 6.0;
@@ -291,6 +300,20 @@ impl Palette {
     /// A 4xx/5xx response, a transport error, a failed test, a broken file.
     pub(crate) fn status_error(self) -> Hsla {
         c(self.error)
+    }
+
+    /// The colour an HTTP method is labelled with, so the verb reads at a glance in the
+    /// URL bar, tabs and history: reads are green, writes warm, deletes red. The hues are
+    /// One's syntax colours, so nothing here is invented.
+    pub(crate) fn method_color(self, method: &str) -> Hsla {
+        match method {
+            "GET" => c(self.success),
+            "POST" => c(self.warning),
+            "PUT" => c(self.text_accent),
+            "PATCH" => c(self.syntax_keyword),
+            "DELETE" => c(self.error),
+            _ => c(self.syntax_type),
+        }
     }
 
     /// The colour of an HTTP status code (FR-RES-02).
@@ -626,6 +649,12 @@ pub(crate) fn apply(mode: ThemeMode, cx: &mut App) {
     theme.radius = px(4.);
     theme.radius_lg = px(6.);
     theme.shadow = false;
+    // `Root` makes this the rem size, so it scales every library control at once. The
+    // library's 16 px default gave 36 px buttons and crowded the toolbar off the window;
+    // Zed's chrome sits at 14 px with 22-28 px controls.
+    theme.font_size = px(UI_TEXT);
+    theme.mono_font_family = crate::ui::mono().into();
+    theme.mono_font_size = px(13.);
 }
 
 /// Follow the system appearance (FR-SET-01). Called once when the window opens and again
@@ -681,6 +710,25 @@ mod tests {
                     ("key", p.json_key()),
                 ],
             );
+        }
+    }
+
+    #[test]
+    fn the_common_methods_each_have_their_own_colour_in_both_modes() {
+        for p in MODES {
+            all_distinct(
+                p,
+                &[
+                    ("GET", p.method_color("GET")),
+                    ("POST", p.method_color("POST")),
+                    ("PUT", p.method_color("PUT")),
+                    ("PATCH", p.method_color("PATCH")),
+                    ("DELETE", p.method_color("DELETE")),
+                    ("HEAD", p.method_color("HEAD")),
+                ],
+            );
+            // the rarely used verbs share one colour rather than inventing more
+            assert_eq!(p.method_color("HEAD"), p.method_color("OPTIONS"));
         }
     }
 

@@ -11,24 +11,19 @@ use gpui::{div, px, Context, Hsla};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::Input;
+use gpui_component::Sizable as _;
 
 impl Workspace {
     pub(crate) fn render_env_page(&self, cx: &Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
         let (muted, border) = (p.text_muted(), p.border());
 
-        let header = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .p_2()
-            .child(div().text_color(muted).child("ENVIRONMENTS & VARIABLES"))
-            .child(
-                Button::new("env-back")
-                    .label("← Back to requests")
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.close_envs(cx))),
-            );
+        let header = self.page_header(
+            "Environments & variables",
+            None,
+            |this, _window, cx| this.close_envs(cx),
+            cx,
+        );
 
         // scope picker: Globals, each environment (● marks the active one), + New
         let mut scopes = div()
@@ -38,6 +33,7 @@ impl Workspace {
             .items_center()
             .gap_1()
             .px_2()
+            .pt_2()
             .pb_2();
         let g = seg_btn(
             "env-scope-g",
@@ -67,6 +63,7 @@ impl Workspace {
         }
         scopes = scopes.child(
             Button::new("env-new")
+                .small()
                 .label("+ New")
                 .on_click(cx.listener(|this, _ev, window, cx| this.on_env_new(window, cx))),
         );
@@ -90,10 +87,11 @@ impl Workspace {
                         div()
                             .w(px(240.))
                             .flex_none()
-                            .child(Input::new(&self.env_name)),
+                            .child(Input::new(&self.env_name).small()),
                     )
                     .child(
                         Button::new("env-active")
+                            .small()
                             .label(if is_active {
                                 "Active ✓ (click to deactivate)"
                             } else {
@@ -111,6 +109,7 @@ impl Workspace {
                     )
                     .child(
                         Button::new("env-del")
+                            .small()
                             .label(if self.confirm_delete {
                                 "Click again to delete"
                             } else {
@@ -153,6 +152,7 @@ impl Workspace {
             let sec = seg_btn_ix("env-sec", ix, "Secret", row.secret, cx);
             let reveal = row.secret.then(|| {
                 Button::new(("env-show", ix))
+                    .small()
                     .label(if row.revealed { "Hide" } else { "Show" })
                     .on_click(cx.listener(move |this, _ev, window, cx| {
                         if let Some(r) = this.env_rows.get_mut(ix) {
@@ -163,14 +163,14 @@ impl Workspace {
                         cx.notify();
                     }))
             });
-            table = table.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div().w(px(24.)).flex_none().child(
+            table =
+                table.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(div().w(px(24.)).flex_none().child(
                             Checkbox::new(("env-en", ix)).checked(row.enabled).on_click(
                                 cx.listener(move |this, checked: &bool, _window, cx| {
                                     if let Some(r) = this.env_rows.get_mut(ix) {
@@ -179,39 +179,41 @@ impl Workspace {
                                     cx.notify();
                                 }),
                             ),
+                        ))
+                        .child(div().flex_1().child(Input::new(&row.key).small()))
+                        .child(div().flex_1().child(Input::new(&row.value).small()))
+                        .child(
+                            div()
+                                .w(px(150.))
+                                .flex_none()
+                                .flex()
+                                .flex_row()
+                                .gap_1()
+                                .child(sec.on_click(cx.listener(move |this, _ev, window, cx| {
+                                    if let Some(r) = this.env_rows.get_mut(ix) {
+                                        r.secret = !r.secret;
+                                        r.revealed = false;
+                                        let masked = r.secret;
+                                        r.value
+                                            .update(cx, |s, cx| s.set_masked(masked, window, cx));
+                                    }
+                                    cx.notify();
+                                })))
+                                .children(reveal),
+                        )
+                        .child(
+                            div().w(px(36.)).flex_none().child(
+                                Button::new(("env-rm", ix)).small().label("✕").on_click(
+                                    cx.listener(move |this, _ev, _window, cx| {
+                                        if ix < this.env_rows.len() {
+                                            this.env_rows.remove(ix);
+                                        }
+                                        cx.notify();
+                                    }),
+                                ),
+                            ),
                         ),
-                    )
-                    .child(div().flex_1().child(Input::new(&row.key)))
-                    .child(div().flex_1().child(Input::new(&row.value)))
-                    .child(
-                        div()
-                            .w(px(150.))
-                            .flex_none()
-                            .flex()
-                            .flex_row()
-                            .gap_1()
-                            .child(sec.on_click(cx.listener(move |this, _ev, window, cx| {
-                                if let Some(r) = this.env_rows.get_mut(ix) {
-                                    r.secret = !r.secret;
-                                    r.revealed = false;
-                                    let masked = r.secret;
-                                    r.value.update(cx, |s, cx| s.set_masked(masked, window, cx));
-                                }
-                                cx.notify();
-                            })))
-                            .children(reveal),
-                    )
-                    .child(div().w(px(36.)).flex_none().child(
-                        Button::new(("env-rm", ix)).label("✕").on_click(cx.listener(
-                            move |this, _ev, _window, cx| {
-                                if ix < this.env_rows.len() {
-                                    this.env_rows.remove(ix);
-                                }
-                                cx.notify();
-                            },
-                        )),
-                    )),
-            );
+                );
         }
 
         let footer = div()
@@ -221,6 +223,7 @@ impl Workspace {
             .p_2()
             .child(
                 Button::new("env-add")
+                    .small()
                     .label("+ Add variable")
                     .on_click(cx.listener(|this, _ev, window, cx| {
                         let row = Self::new_env_row(window, cx, &EnvVar::new("", ""));
@@ -230,6 +233,7 @@ impl Workspace {
             )
             .child(
                 Button::new("env-save")
+                    .small()
                     .primary()
                     .label("Save")
                     .on_click(cx.listener(|this, _ev, _window, cx| {
@@ -240,6 +244,7 @@ impl Workspace {
             .child(div().flex_1())
             .child(
                 Button::new("env-import")
+                    .small()
                     .label("Import…")
                     .on_click(cx.listener(|this, _ev, window, cx| this.on_import(window, cx))),
             )
@@ -261,6 +266,7 @@ impl Workspace {
             )
             .child(
                 Button::new("env-export")
+                    .small()
                     .label("Export…")
                     .on_click(cx.listener(|this, _ev, window, cx| this.on_export_env(window, cx))),
             );
@@ -273,7 +279,8 @@ impl Workspace {
 
         div()
             .flex_1()
-            .h_full()
+            .min_h_0()
+            .w_full()
             .flex()
             .flex_col()
             .child(header)

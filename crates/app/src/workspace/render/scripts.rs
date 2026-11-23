@@ -11,6 +11,7 @@ use gpui::{div, px, App, Context, Entity};
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputState};
 use gpui_component::ActiveTheme as _;
+use gpui_component::Sizable as _;
 
 impl Workspace {
     pub(crate) fn has_scripts(tab: &RequestTab, cx: &App) -> bool {
@@ -99,6 +100,7 @@ impl Workspace {
             let code = code.to_string();
             bar = bar.child(
                 Button::new(("snippet", i))
+                    .small()
                     .label(name.to_string())
                     .on_click(cx.listener(move |this, _ev, window, cx| {
                         let tab = this.tab_mut();

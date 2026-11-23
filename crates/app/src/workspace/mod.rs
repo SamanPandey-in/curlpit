@@ -33,6 +33,7 @@ use at_store::{Session, Store, StoreError};
 use gpui::prelude::*;
 use gpui::{Context, Entity, FocusHandle, Subscription, Window};
 use gpui_component::input::{InputEvent, InputState};
+use gpui_component::resizable::ResizableState;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -86,6 +87,12 @@ pub(crate) struct Workspace {
     /// Why cookies couldn't be loaded or saved.
     cookie_note: Option<String>,
     confirm_clear_cookies: bool,
+    // ---- layout ----
+    /// The sidebar is shown (toggled from the status bar or with the primary key + B).
+    sidebar_open: bool,
+    /// Sidebar | main split. Held here rather than keyed by id so `render` can read the
+    /// sidebar's current width, which the response viewer's wrap width depends on.
+    side_split: Entity<ResizableState>,
     _subs: Vec<Subscription>,
 }
 
@@ -195,6 +202,8 @@ impl Workspace {
             cookies: Arc::new(cookies),
             cookie_note,
             confirm_clear_cookies: false,
+            sidebar_open: true,
+            side_split: cx.new(|_| ResizableState::default()),
             runner: Runner {
                 target: None,
                 iterations: cx.new(|cx| InputState::new(window, cx).default_value("1")),

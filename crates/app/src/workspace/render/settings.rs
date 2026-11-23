@@ -1,85 +1,92 @@
 //! The Settings editor tab: per-request timeout, redirect following and TLS
-//! verification.
+//! verification, laid out as a settings form — a label column and a control column —
+//! with real switches for the two on/off options.
 
 use crate::request_tab::RequestTab;
-use crate::theme::Palette;
-use crate::ui::seg_btn_ix;
+use crate::theme::{Palette, S1, S2, S3, SMALL_TEXT};
 use crate::workspace::Workspace;
 use gpui::prelude::*;
-use gpui::{div, px, Context};
+use gpui::{div, px, AnyElement, Context};
 use gpui_component::input::Input;
+use gpui_component::switch::Switch;
+use gpui_component::{Icon, IconName, Sizable as _};
+
+/// Width of the label column.
+const LABEL_W: f32 = 170.0;
 
 impl Workspace {
     pub(crate) fn render_settings(&self, tab: &RequestTab, cx: &Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
-        let muted = p.text_muted();
+        let row = |label: &'static str, hint: &'static str, control: AnyElement| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(S3))
+                .child(
+                    div()
+                        .w(px(LABEL_W))
+                        .flex_none()
+                        .flex()
+                        .flex_col()
+                        .child(div().text_color(p.text()).child(label))
+                        .child(
+                            div()
+                                .text_size(px(SMALL_TEXT))
+                                .text_color(p.text_placeholder())
+                                .child(hint),
+                        ),
+                )
+                .child(control)
+        };
         div()
-            .p_2()
+            .p(px(S3))
             .flex()
             .flex_col()
-            .gap_2()
-            .child(
+            .gap(px(S3 + S1))
+            .child(row(
+                "Timeout",
+                "Milliseconds; 0 for none",
+                div()
+                    .w(px(140.))
+                    .flex_none()
+                    .child(Input::new(&tab.timeout).small())
+                    .into_any_element(),
+            ))
+            .child(row(
+                "Follow redirects",
+                "Up to 10 hops",
+                Switch::new("set-redirect")
+                    .checked(tab.follow_redirects)
+                    .on_click(cx.listener(|this, on: &bool, _window, cx| {
+                        this.tab_mut().follow_redirects = *on;
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            ))
+            .child(row(
+                "Verify TLS certificates",
+                "Reject invalid or self-signed",
+                Switch::new("set-tls")
+                    .checked(tab.verify_tls)
+                    .on_click(cx.listener(|this, on: &bool, _window, cx| {
+                        this.tab_mut().verify_tls = *on;
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            ))
+            .children((!tab.verify_tls).then(|| {
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .w(px(150.))
-                            .flex_none()
-                            .text_color(muted)
-                            .child("Timeout (ms)"),
-                    )
-                    .child(div().w(px(140.)).flex_none().child(Input::new(&tab.timeout)))
-                    .child(div().text_color(muted).child("0 = no timeout")),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .child(
-                        seg_btn_ix(
-                            "set-redirect",
-                            0,
-                            if tab.follow_redirects {
-                                "Follow redirects: on"
-                            } else {
-                                "Follow redirects: off"
-                            },
-                            tab.follow_redirects,
-                            cx,
-                        )
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            let tab = this.tab_mut();
-                            tab.follow_redirects = !tab.follow_redirects;
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        seg_btn_ix(
-                            "set-tls",
-                            0,
-                            if tab.verify_tls {
-                                "Verify TLS certificates: on"
-                            } else {
-                                "Verify TLS certificates: off"
-                            },
-                            tab.verify_tls,
-                            cx,
-                        )
-                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                            let tab = this.tab_mut();
-                            tab.verify_tls = !tab.verify_tls;
-                            cx.notify();
-                        })),
-                    ),
-            )
-            .children((!tab.verify_tls).then(|| {
-                div()
+                    .gap(px(S2))
                     .text_color(p.warning_text())
-                    .child("Certificate checks are off for this request: only use this for local or test servers.")
+                    .child(Icon::new(IconName::TriangleAlert).small())
+                    .child(
+                        "Certificate checks are off for this request: only use this for \
+                         local or test servers.",
+                    )
             }))
     }
 }

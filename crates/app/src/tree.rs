@@ -53,6 +53,21 @@ impl TreeView {
 /// literal for scalars (strings quoted, so they can't be read as numbers). A container must
 /// never go through `value_text`, which returns its whole subtree -- that is for "Copy value",
 /// one node at a time.
+/// `s` with line breaks, tabs and other control characters written as escapes.
+fn escape_controls(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub(crate) fn tree_value_display(t: &JsonTree, src: &[u8], ix: u32) -> String {
     let Some(node) = t.nodes().get(ix as usize) else {
         return String::new();
@@ -62,7 +77,10 @@ pub(crate) fn tree_value_display(t: &JsonTree, src: &[u8], ix: u32) -> String {
     }
     let text = t.value_text(src, ix);
     if node.kind == Kind::String {
-        format!("\"{}\"", clip(&text, TREE_VALUE_MAX))
+        // The text is decoded, so a JSON "\n" is a real line break here; a tree row is one
+        // fixed-height line, and a raw break drew the rest of the string over the rows
+        // below. Show control characters escaped, as they appear in the source.
+        format!("\"{}\"", clip(&escape_controls(&text), TREE_VALUE_MAX))
     } else {
         clip(&text, TREE_VALUE_MAX)
     }
@@ -72,6 +90,15 @@ pub(crate) fn tree_value_display(t: &JsonTree, src: &[u8], ix: u32) -> String {
 mod tests {
     use super::*;
     use at_core::json_tree::{JsonTree, Kind};
+
+    #[test]
+    fn tree_rows_keep_multiline_strings_on_one_line() {
+        let src = br#"{"s":"a\nb\tc"}"#;
+        let t = JsonTree::parse(src).expect("parses");
+        let shown = tree_value_display(&t, src, 1);
+        assert!(!shown.contains('\n') && !shown.contains('\t'), "{shown:?}");
+        assert_eq!(shown, r#""a\nb\tc""#);
+    }
 
     #[test]
     fn tree_rows_show_summaries_scalars_and_clipped_strings() {
