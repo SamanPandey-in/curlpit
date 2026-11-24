@@ -18,3 +18,9 @@ cookie_store = "0.22"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time", "io-util"] }
+# G-17 TLS tests: a local rustls server with certificates generated at test time. ring only,
+# matching the provider reqwest's rustls backend already uses.
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tempfile = "3"

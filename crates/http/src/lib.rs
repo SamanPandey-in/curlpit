@@ -10,8 +10,12 @@ use bytes::Bytes;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
+pub mod client_cache;
 pub mod cookies;
+pub mod tls;
+pub use client_cache::ClientCache;
 pub use cookies::{CookieInfo, CookieJar};
+pub use tls::{default_tls, set_default_tls, ClientCert, TlsConfig, TlsVersion};
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
@@ -67,6 +71,12 @@ pub struct EngineConfig {
     pub cookies: Option<Arc<CookieJar>>,
     /// Outbound proxy URL applied to every request; empty = direct connection.
     pub proxy: String,
+    /// Where clients are cached between sends, so repeat requests reuse pooled connections and
+    /// TLS sessions. `None` = one process-wide cache shared by every `EngineConfig`.
+    pub client_cache: Option<Arc<ClientCache>>,
+    /// CA bundle, client certificates and minimum TLS version (G-17). The default is the
+    /// process-wide [`default_tls`], which the app sets from its Settings.
+    pub tls: TlsConfig,
 }
 
 impl Default for EngineConfig {
@@ -76,6 +86,8 @@ impl Default for EngineConfig {
             spill_dir: std::env::temp_dir().join("api-tester-spill"),
             cookies: None,
             proxy: String::new(),
+            client_cache: None,
+            tls: default_tls(),
         }
     }
 }
@@ -103,33 +115,24 @@ async fn run(
 ) -> Result<HttpResponse, HttpError> {
     let start = Instant::now();
 
-    // NOTE: client is built per request for now (per-request TLS/redirect/timeout
-    // settings). Phase 2 will cache clients keyed by settings to reuse connections.
-    let mut cb = reqwest::Client::builder()
-        .danger_accept_invalid_certs(!settings.verify_tls)
-        .redirect(if settings.follow_redirects {
-            reqwest::redirect::Policy::limited(10)
-        } else {
-            reqwest::redirect::Policy::none()
-        });
-    if settings.timeout_ms > 0 {
-        cb = cb.timeout(Duration::from_millis(settings.timeout_ms));
-    }
-    if let Some(jar) = &cfg.cookies {
-        // a Cookie header set on the request itself is left alone; the jar adds nothing then
-        cb = cb.cookie_provider(jar.clone());
-    }
-    if !cfg.proxy.is_empty() {
-        cb = cb.proxy(
-            reqwest::Proxy::all(&cfg.proxy)
-                .map_err(|e| HttpError::InvalidRequest(e.to_string()))?,
-        );
-    }
-    let client = cb.build().map_err(|e| HttpError::Other(e.to_string()))?;
+    // Clients are cached by their client-level settings (TLS, redirects, proxy, cookie jar,
+    // and the client certificate for this host); the timeout is per request so it never
+    // forces a new client.
+    let host = reqwest::Url::parse(&built.url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_default();
+    let client = match &cfg.client_cache {
+        Some(cache) => cache.get(settings, cfg, &host)?,
+        None => client_cache::shared().get(settings, cfg, &host)?,
+    };
 
     let method = reqwest::Method::from_bytes(built.method.as_str().as_bytes())
         .map_err(|e| HttpError::InvalidRequest(e.to_string()))?;
     let mut rb = client.request(method, &built.url);
+    if settings.timeout_ms > 0 {
+        rb = rb.timeout(Duration::from_millis(settings.timeout_ms));
+    }
     for (k, v) in &built.headers {
         rb = rb.header(k.as_str(), v.as_str());
     }
@@ -242,7 +245,13 @@ fn classify(e: reqwest::Error) -> HttpError {
         HttpError::Dns(text)
     } else if l.contains("connection refused") || l.contains("actively refused") {
         HttpError::ConnectionRefused(text)
-    } else if l.contains("certificate") || l.contains("tls") || l.contains("ssl") {
+    } else if l.contains("certificate")
+        || l.contains("tls")
+        || l.contains("ssl")
+        // rustls reports a refused handshake (e.g. no common TLS version) as an alert
+        || l.contains("fatal alert")
+        || l.contains("handshake")
+    {
         HttpError::Tls(text)
     } else if e.is_connect() {
         HttpError::Connect(text)

@@ -164,8 +164,7 @@ async fn large_body_spills_to_disk() {
     let cfg = EngineConfig {
         spill_threshold: 100,
         spill_dir: dir.clone(),
-        cookies: None,
-        proxy: String::new(),
+        ..Default::default()
     };
     let resp = send(
         &built,
