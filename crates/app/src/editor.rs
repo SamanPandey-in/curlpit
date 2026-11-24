@@ -109,12 +109,7 @@ pub(crate) fn next_method(m: Method) -> Method {
     }
 }
 
-pub(crate) fn has_body(m: Method) -> bool {
-    matches!(
-        m,
-        Method::Post | Method::Put | Method::Patch | Method::Delete
-    )
-}
+pub(crate) use at_runner::has_body;
 
 /// One editable key/value row (params, headers, urlencoded fields).
 pub(crate) struct KvRow {

@@ -78,7 +78,17 @@ pub struct ScriptInput {
     pub globals: VarMap,
     /// Runtime ("local") variables: highest precedence, live for this send only.
     pub variables: VarMap,
+    /// The data-file row of this iteration (`pm.iterationData`); empty outside a data-driven run.
+    pub iteration_data: DataRow,
+    /// 0-based iteration of a collection run (`pm.info.iteration`); 0 for a single send.
+    pub iteration: usize,
+    /// Iterations in the run (`pm.info.iterationCount`); 0 is shown to scripts as 1.
+    pub iteration_count: usize,
 }
+
+/// One row of a run's data file: column (or JSON key) -> value. CSV cells are strings; JSON
+/// rows keep their types, so `pm.iterationData.get("n")` can be a number.
+pub type DataRow = serde_json::Map<String, serde_json::Value>;
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct TestResult {
@@ -136,6 +146,9 @@ struct JsInput<'a> {
     environment: &'a VarMap,
     globals: &'a VarMap,
     variables: &'a VarMap,
+    iteration_data: &'a DataRow,
+    iteration: usize,
+    iteration_count: usize,
 }
 
 #[derive(Deserialize)]
@@ -198,6 +211,9 @@ fn run_inner(
         environment: &input.environment,
         globals: &input.globals,
         variables: &input.variables,
+        iteration_data: &input.iteration_data,
+        iteration: input.iteration,
+        iteration_count: input.iteration_count,
     })
     .map_err(|e| e.to_string())?;
 
@@ -549,6 +565,42 @@ mod tests {
             Limits::default(),
         );
         assert!(o.error.unwrap().contains("isn't supported yet"));
+    }
+
+    #[test]
+    fn iteration_data_is_visible_and_read_only() {
+        let mut i = input();
+        i.iteration_data = serde_json::json!({"user": "ada", "n": 3})
+            .as_object()
+            .unwrap()
+            .clone();
+        i.iteration = 1;
+        i.iteration_count = 2;
+        let o = run(
+            r#"pm.test("get", () => pm.expect(pm.iterationData.get("user")).to.equal("ada"));
+               pm.test("typed", () => pm.expect(pm.iterationData.get("n")).to.equal(3));
+               pm.test("has", () => pm.expect(pm.iterationData.has("user") && !pm.iterationData.has("x")).to.be.true);
+               pm.test("obj", () => pm.expect(pm.iterationData.toObject()).to.eql({user: "ada", n: 3}));
+               pm.test("missing", () => pm.expect(pm.iterationData.get("x")).to.be.undefined);
+               pm.test("info", () => pm.expect([pm.info.iteration, pm.info.iterationCount]).to.eql([1, 2]));
+               pm.iterationData.toObject().user = "changed";
+               pm.test("copy", () => pm.expect(pm.iterationData.get("user")).to.equal("ada"));"#,
+            Phase::PreRequest,
+            &i,
+            Limits::default(),
+        );
+        assert!(o.error.is_none(), "{:?}", o.error);
+        assert!(o.tests.iter().all(|t| t.passed), "{:?}", o.tests);
+
+        // outside a run: empty, and iterationCount reads 1
+        let o = run(
+            r#"pm.test("empty", () => pm.expect(pm.iterationData.toObject()).to.eql({}));
+               pm.test("count", () => pm.expect(pm.info.iterationCount).to.equal(1));"#,
+            Phase::PreRequest,
+            &input(),
+            Limits::default(),
+        );
+        assert!(o.tests.iter().all(|t| t.passed), "{:?}", o.tests);
     }
 
     #[test]

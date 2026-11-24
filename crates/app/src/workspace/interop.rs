@@ -109,8 +109,16 @@ impl Workspace {
                 Ok((_, sum)) => {
                     self.refresh_sidebar();
                     self.side_view = SideView::Collections;
+                    // Collections with scripts are written untrusted (G-16); say so now,
+                    // not only when the first Send is held back.
+                    let scripts = match sum.scripts {
+                        0 => String::new(),
+                        n => format!(
+                            ", {n} script(s): they won't run until you trust the collection"
+                        ),
+                    };
                     self.notice(Status::Info(format!(
-                        "Imported \"{}\": {} request(s), {} folder(s){}",
+                        "Imported \"{}\": {} request(s), {} folder(s){scripts}{}",
                         col.name,
                         sum.requests,
                         sum.folders,

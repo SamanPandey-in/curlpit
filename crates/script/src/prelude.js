@@ -320,11 +320,29 @@
       has: (k) => lookup(k) !== undefined,
     }),
     collectionVariables: scope({}),
+    // The data-file row of this iteration; read-only (Postman has no setter either).
+    iterationData: (() => {
+      const d = input.iteration_data || {};
+      const copy = (v) =>
+        v !== null && typeof v === "object" ? JSON.parse(JSON.stringify(v)) : v;
+      return {
+        get: (k) => (has(d, k) ? copy(d[k]) : undefined),
+        has: (k) => has(d, k),
+        toObject: () => copy(d),
+        toJSON: () => copy(d),
+        replaceIn,
+      };
+    })(),
     request,
     response,
     test,
     expect,
-    info: { eventName: input.phase, requestName: input.request_name || "" },
+    info: {
+      eventName: input.phase,
+      requestName: input.request_name || "",
+      iteration: input.iteration || 0,
+      iterationCount: input.iteration_count || 1,
+    },
     sendRequest: () => {
       throw new Error("pm.sendRequest isn't supported yet");
     },

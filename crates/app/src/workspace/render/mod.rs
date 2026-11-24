@@ -19,6 +19,7 @@ mod settings;
 mod settings_page;
 mod side;
 mod tree;
+pub(crate) mod trust_banner;
 
 use crate::actions::{
     CloseTab, FindInResponse, NewTab, PaletteDismiss, PaletteNext, PalettePrev, ReopenTab,
@@ -794,6 +795,7 @@ impl Render for Workspace {
             .child(self.render_tab_bar(cx))
             .child(toolbar)
             .child(url_bar)
+            .children(self.render_trust_banner(cx))
             .child(
                 div().flex_1().min_h_0().child(
                     v_resizable("req-split")

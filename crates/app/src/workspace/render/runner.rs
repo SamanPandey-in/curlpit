@@ -6,6 +6,8 @@ use crate::runner::RunResult;
 use crate::sidebar::MainView;
 use crate::theme::Palette;
 use crate::ui::seg_btn_ix;
+use crate::workspace::render::trust_banner::{trust_bar, trust_message};
+use crate::workspace::send::{ScriptMode, TrustGate};
 use crate::workspace::Workspace;
 use gpui::prelude::*;
 use gpui::{div, px, ClipboardItem, Context};
@@ -14,6 +16,37 @@ use gpui_component::input::Input;
 use gpui_component::Sizable as _;
 
 impl Workspace {
+    /// The trust prompt before running an untrusted collection with scripts (G-16).
+    fn render_run_trust(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        let u = TrustGate::runner(cx)?;
+        Some(
+            trust_bar(trust_message(&u, "the run has not started"), cx)
+                .child(
+                    Button::new("run-trust")
+                        .small()
+                        .primary()
+                        .label("Trust collection")
+                        .on_click(cx.listener(|this, _ev, _window, cx| this.trust_and_run(cx))),
+                )
+                .child(
+                    Button::new("run-no-scripts")
+                        .small()
+                        .label("Run without scripts")
+                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                            this.start_run_with(ScriptMode::Without, cx)
+                        })),
+                )
+                .child(
+                    Button::new("run-trust-cancel")
+                        .small()
+                        .ghost()
+                        .label("Cancel")
+                        .on_click(cx.listener(|this, _ev, _window, cx| this.dismiss_run_trust(cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
     pub(crate) fn render_runner(&self, cx: &Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
         let (muted, border) = (p.text_muted(), p.border_variant());
@@ -212,6 +245,7 @@ impl Workspace {
             .flex_col()
             .gap_2()
             .child(header)
+            .children(self.render_run_trust(cx))
             .child(div().flex_none().px_2().child(target))
             .child(options.flex_none())
             .children(r.notes.iter().map(|n| {

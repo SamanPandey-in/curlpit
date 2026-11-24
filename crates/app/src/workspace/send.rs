@@ -1,151 +1,150 @@
-//! Sending one request. `execute` is the whole off-thread pipeline (pre-request script,
-//! build, send, test script, history) and is also what the collection runner drives; the
+//! Sending one request. The off-thread pipeline itself is `at_runner::execute`; the
 //! `Workspace` methods here start a send, fold the result back into its tab, and keep
 //! whatever its scripts changed.
 
 use crate::response::{content_type, ViewData};
-use crate::script::{
-    merge_script_vars, script_input, script_response, take_script_request, take_script_vars,
-    to_var_map, ScriptReport,
-};
+use crate::script::ScriptReport;
 use crate::sidebar::SideView;
 use crate::ui::Status;
-use crate::workspace::{sendable, SendOutcome, Workspace};
-use at_core::{build, Environment, Request, Variables};
-use at_history::{now_ms, History, Record};
-use at_http::{send, CookieJar, EngineConfig, HttpError, ResponseBody};
-use at_script::{Phase, ScriptInput, VarMap};
-use gpui::{Context, Window};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use crate::workspace::{SendOutcome, Workspace};
+use at_core::Environment;
+use at_runner::{execute, merge_script_vars};
+use at_script::VarMap;
+use at_store::Store;
+use gpui::{App, Context, Global, Window};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
-/// What history keeps of one send. `request` is the request as typed (variables unresolved).
-pub(crate) fn history_record(
-    request: Request,
-    result: &Result<at_http::HttpResponse, HttpError>,
-    elapsed: Duration,
-) -> Record {
-    match result {
-        Ok(resp) => Record {
-            request,
-            status: Some(resp.status),
-            status_text: resp.status_text.clone(),
-            elapsed_ms: resp.elapsed.as_millis() as u64,
-            size: resp.size,
-            error: None,
-            resp_headers: resp.headers.clone(),
-            resp_body: match &resp.body {
-                // Copy at most one byte more than history keeps, so it can tell the body was cut.
-                ResponseBody::Memory(b) => {
-                    Some(b[..b.len().min(at_history::DEFAULT_MAX_BODY + 1)].to_vec())
-                }
-                ResponseBody::File { .. } => None,
-            },
-        },
-        Err(e) => Record {
-            request,
-            elapsed_ms: elapsed.as_millis() as u64,
-            error: Some(e.to_string()),
-            ..Default::default()
-        },
+/// A collection whose scripts are held back until the user decides (G-16).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Untrusted {
+    /// Collection root.
+    pub(crate) dir: PathBuf,
+    pub(crate) name: String,
+    /// Scripts in the collection (or in the folder about to run).
+    pub(crate) scripts: usize,
+}
+
+/// The trust prompts on screen: per request tab, and for the collection runner. App-wide
+/// state kept as a gpui global so the prompt needs no new `Workspace` fields.
+#[derive(Default)]
+pub(crate) struct TrustGate {
+    /// Tab id -> the untrusted collection its last Send was stopped for.
+    pub(crate) tabs: HashMap<u64, Untrusted>,
+    /// Set while the runner page asks before running an untrusted collection.
+    pub(crate) runner: Option<Untrusted>,
+    /// Script-free copies made for "Run without scripts": copy -> original request file.
+    pub(crate) run_copies: HashMap<PathBuf, PathBuf>,
+    /// Folder holding those copies, removed when the run ends.
+    pub(crate) run_copy_dir: Option<PathBuf>,
+}
+
+impl Global for TrustGate {}
+
+impl TrustGate {
+    pub(crate) fn get(cx: &App) -> Option<&TrustGate> {
+        cx.try_global::<TrustGate>()
+    }
+
+    pub(crate) fn tab(cx: &App, id: u64) -> Option<Untrusted> {
+        Self::get(cx).and_then(|g| g.tabs.get(&id).cloned())
+    }
+
+    pub(crate) fn runner(cx: &App) -> Option<Untrusted> {
+        Self::get(cx).and_then(|g| g.runner.clone())
     }
 }
 
-/// One request through the whole pipeline, off the UI thread: pre-request script -> build ->
-/// send -> test script (scripts on the blocking pool so a slow one never stalls networking).
-/// Returns what happened plus the variables after its scripts, so a run can chain them.
-/// `history: None` skips recording (the collection runner doesn't fill History).
-pub(crate) async fn execute(
-    mut req: Request,
-    mut vars: Variables,
-    env_name: Option<String>,
-    token: CancellationToken,
-    history: Option<Arc<Mutex<History>>>,
-    cookies: Arc<CookieJar>,
-    proxy: String,
-) -> (SendOutcome, Variables) {
-    let env_before = to_var_map(&vars.environment);
-    let globals_before = to_var_map(&vars.global);
-    let run = |src: String, phase: Phase, input: ScriptInput| {
-        tokio::task::spawn_blocking(move || {
-            at_script::run(&src, phase, &input, at_script::Limits::default())
-        })
-    };
-
-    let pre = if req.pre_request_script.trim().is_empty() {
-        None
-    } else {
-        let input = script_input(&req, &vars, env_name.clone(), None);
-        let before = input.request.clone();
-        let out = run(req.pre_request_script.clone(), Phase::PreRequest, input)
-            .await
-            .ok();
-        if let Some(o) = &out {
-            take_script_vars(&mut vars, o);
-            take_script_request(&mut req, &before, &o.request);
-        }
-        out
-    };
-
-    let req = sendable(req, &vars);
-    let built = match build(&req, &vars) {
-        Ok(b) => b,
-        Err(e) => {
-            let out = SendOutcome {
-                sent: Err(e.to_string()),
-                unresolved: Vec::new(),
-                pre,
-                test: None,
-                env_before,
-                globals_before,
-                hist_err: None,
-            };
-            return (out, vars);
-        }
-    };
-    let started = Instant::now();
-    let engine = EngineConfig {
-        cookies: Some(cookies),
-        proxy,
-        ..Default::default()
-    };
-    let r = send(&built, &req.settings, &engine, &token).await;
-
-    let test = match &r {
-        Ok(resp) if !req.test_script.trim().is_empty() => {
-            let input = script_input(&req, &vars, env_name, Some(script_response(resp)));
-            let out = run(req.test_script.clone(), Phase::Test, input).await.ok();
-            if let Some(o) = &out {
-                take_script_vars(&mut vars, o);
-            }
-            out
-        }
-        _ => None,
-    };
-
-    // Record on the network thread so the UI never waits for the disk.
-    let hist_err = history.and_then(|h| {
-        let rec = history_record(req, &r, started.elapsed());
-        match h.lock() {
-            Ok(mut h) => h.add(&rec, now_ms()).err().map(|e| e.to_string()),
-            Err(_) => Some("history is unavailable".to_string()),
-        }
-    });
-    let out = SendOutcome {
-        sent: Ok(r),
-        unresolved: built.unresolved,
-        pre,
-        test,
-        env_before,
-        globals_before,
-        hist_err,
-    };
-    (out, vars)
+/// How a Send treats scripts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScriptMode {
+    /// Run them, unless the request is in an untrusted collection (then ask).
+    Normal,
+    /// Send once with the pre-request and test scripts blanked.
+    Without,
 }
 
 impl Workspace {
+    /// The collection (display name, root) that `path` lives in: the first directory under
+    /// the store's collections root. Worked out from the path, not the sidebar, so a
+    /// collapsed or filtered sidebar can never let a request skip the trust check.
+    pub(crate) fn collection_of(&self, path: &Path) -> Option<(String, PathBuf)> {
+        let root = self.store.as_ref()?.root();
+        let first = path.strip_prefix(root).ok()?.components().next()?;
+        let dir = root.join(first);
+        if !dir.is_dir() {
+            return None;
+        }
+        let name = Store::load_collection_meta(&dir)
+            .map(|m| m.name)
+            .unwrap_or_else(|_| first.as_os_str().to_string_lossy().into_owned());
+        Some((name, dir))
+    }
+
+    /// The untrusted collection holding `path`, with its script count; `None` when the
+    /// collection is trusted, unknown or unreadable (a broken `collection.toml` is reported
+    /// elsewhere, and treating it as untrusted would block every send).
+    pub(crate) fn untrusted_at(&self, path: &Path, within: Option<&Path>) -> Option<Untrusted> {
+        let (name, dir) = self.collection_of(path)?;
+        let meta = Store::load_collection_meta(&dir).ok()?;
+        if meta.trusted {
+            return None;
+        }
+        let counted = within.unwrap_or(&dir);
+        let scripts = at_interop::read_collection(&name, counted)
+            .map(|(c, _)| at_interop::count_scripts(&c))
+            .unwrap_or(0);
+        Some(Untrusted {
+            name: meta.name,
+            dir,
+            scripts,
+        })
+    }
+
+    /// Mark a collection trusted (G-16) and drop every prompt that was waiting on it.
+    pub(crate) fn trust_collection(&mut self, dir: &Path, cx: &mut Context<Self>) -> bool {
+        let result = Store::load_collection_meta(dir).and_then(|mut meta| {
+            meta.trusted = true;
+            Store::save_collection_meta(dir, &meta)
+        });
+        if let Err(e) = result {
+            self.notice(Status::Error(format!(
+                "Could not trust the collection: {e}"
+            )));
+            cx.notify();
+            return false;
+        }
+        let gate = cx.default_global::<TrustGate>();
+        gate.tabs.retain(|_, u| u.dir != dir);
+        if gate.runner.as_ref().is_some_and(|u| u.dir == dir) {
+            gate.runner = None;
+        }
+        true
+    }
+
+    /// "Trust collection" on a tab's prompt: trust it, then send.
+    pub(crate) fn trust_and_send(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(u) = TrustGate::tab(cx, id) else {
+            return;
+        };
+        if self.trust_collection(&u.dir, cx) {
+            self.send_tab(id, cx);
+        }
+    }
+
+    /// "Send without scripts" on a tab's prompt.
+    pub(crate) fn send_without_scripts(&mut self, id: u64, cx: &mut Context<Self>) {
+        cx.default_global::<TrustGate>().tabs.remove(&id);
+        self.send_tab_with(id, ScriptMode::Without, cx);
+    }
+
+    /// Close a tab's prompt without sending.
+    pub(crate) fn dismiss_trust(&mut self, id: u64, cx: &mut Context<Self>) {
+        cx.default_global::<TrustGate>().tabs.remove(&id);
+        cx.notify();
+    }
+
     /// Send the active tab's request, or cancel it if one is already in flight.
     pub(crate) fn send_active(&mut self, cx: &mut Context<Self>) {
         let id = self.tab().id;
@@ -154,6 +153,12 @@ impl Workspace {
 
     /// Send a tab's request, or cancel it if one is already in flight.
     pub(crate) fn send_tab(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.send_tab_with(id, ScriptMode::Normal, cx);
+    }
+
+    /// Send a tab's request (or cancel the one in flight). A request with scripts in an
+    /// untrusted collection is not sent: the tab shows the trust prompt instead (G-16).
+    pub(crate) fn send_tab_with(&mut self, id: u64, mode: ScriptMode, cx: &mut Context<Self>) {
         let vars = self.variables();
         let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else {
             return;
@@ -162,7 +167,27 @@ impl Workspace {
             token.cancel();
             return;
         }
-        let req = tab.current_request(cx);
+        let mut req = tab.current_request(cx);
+        let path = tab.current_path.clone();
+        let has_scripts =
+            !req.pre_request_script.trim().is_empty() || !req.test_script.trim().is_empty();
+        if mode == ScriptMode::Without {
+            req.pre_request_script.clear();
+            req.test_script.clear();
+        } else if has_scripts {
+            if let Some(u) = path.as_deref().and_then(|p| self.untrusted_at(p, None)) {
+                cx.default_global::<TrustGate>().tabs.insert(id, u);
+                cx.notify();
+                return;
+            }
+        }
+        if cx.has_global::<TrustGate>() {
+            cx.global_mut::<TrustGate>().tabs.remove(&id);
+        }
+        crate::workspace::settings_page::apply_tls(&self.settings);
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else {
+            return;
+        };
         tab.copied = false;
         let token = CancellationToken::new();
         tab.cancel = Some(token.clone());

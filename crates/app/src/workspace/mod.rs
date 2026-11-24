@@ -20,17 +20,16 @@ mod settings_page;
 mod tabs;
 mod tree;
 
-use crate::editor::{has_body, EnvRow};
+use crate::editor::EnvRow;
 use crate::request_tab::{ClosedTab, RequestTab};
 use crate::runner::Runner;
 use crate::sidebar::{MainView, Scope, SideView, SidebarItem};
 use crate::ui::Status;
 use crate::workspace::session::SESSION_SAVE_EVERY;
 use at_codegen::Lang;
-use at_core::{Body, EnvVar, Environment, Request, Variables};
+use at_core::{EnvVar, Environment};
 use at_history::{History, Summary, DEFAULT_MAX_BODY};
-use at_http::{CookieJar, HttpError};
-use at_script::{ScriptOutput, VarMap};
+use at_http::CookieJar;
 use at_store::{Session, Settings, Store, StoreError};
 use gpui::prelude::*;
 use gpui::{Context, Entity, FocusHandle, Subscription, Window};
@@ -349,29 +348,7 @@ impl Workspace {
     }
 }
 
-/// What a send produced; sent from the network task back to the UI thread.
-pub(crate) struct SendOutcome {
-    pub(crate) sent: Result<Result<at_http::HttpResponse, HttpError>, String>,
-    pub(crate) unresolved: Vec<String>,
-    pub(crate) pre: Option<ScriptOutput>,
-    pub(crate) test: Option<ScriptOutput>,
-    pub(crate) env_before: VarMap,
-    pub(crate) globals_before: VarMap,
-    pub(crate) hist_err: Option<String>,
-}
-
-/// The request as it goes out: `https://` is added when the URL has no scheme *after*
-/// variable substitution (so `{{base}}/users` works when `base` contains one), and methods
-/// that don't take a body send none.
-pub(crate) fn sendable(mut req: Request, vars: &Variables) -> Request {
-    if !req.url.is_empty() && !vars.resolve(&req.url).text.contains("://") {
-        req.url = format!("https://{}", req.url);
-    }
-    if !has_body(req.method) {
-        req.body = Body::None;
-    }
-    req
-}
+pub(crate) use at_runner::{sendable, SendOutcome};
 
 /// Merge imported variables into existing ones: same key (exact) replaces, new keys are added.
 /// Returns the merged list and how many were replaced.

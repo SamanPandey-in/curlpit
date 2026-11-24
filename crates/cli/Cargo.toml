@@ -1,0 +1,33 @@
+[package]
+name = "at-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Headless collection runner for CI (GAPS-AND-ROADMAP G-12). Thin: the run loop, data files
+# and reporters live in `at-runner` so the app can reuse them.
+# The executable's name is set here only; the code reads it back via CARGO_BIN_NAME.
+[[bin]]
+name = "api-tester-cli"
+path = "src/main.rs"
+
+[dependencies]
+at-core = { path = "../core" }
+at-store = { path = "../store" }
+at-runner = { path = "../runner" }
+tokio.workspace = true
+tokio-util.workspace = true
+async-channel = "2"
+serde.workspace = true
+toml = "0.8"
+# The app's default data dir (same lookup as `Store::open_default`, without creating it).
+directories = "5"
+clap = { version = "4.5", features = ["derive"] }
+
+[dev-dependencies]
+at-core = { path = "../core" }
+at-store = { path = "../store" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }
+tempfile = "3"
+roxmltree = "0.20"
+serde_json.workspace = true

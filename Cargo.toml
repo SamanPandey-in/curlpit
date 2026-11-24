@@ -1,14 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/http", "crates/demo", "crates/store", "crates/history", "crates/interop", "crates/codegen", "crates/script", "crates/app", "benches"]
+members = ["crates/core", "crates/http", "crates/demo", "crates/store", "crates/history", "crates/interop", "crates/codegen", "crates/script", "crates/runner", "crates/cli", "crates/app", "benches"]
 # CI and plain `cargo test` skip the GUI crate (slow to build); build it with `-p at-app`.
-default-members = ["crates/core", "crates/http", "crates/demo", "crates/store", "crates/history", "crates/interop", "crates/codegen", "crates/script"]
+default-members = ["crates/core", "crates/http", "crates/demo", "crates/store", "crates/history", "crates/interop", "crates/codegen", "crates/script", "crates/runner", "crates/cli"]
 
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-rust-version = "1.80"
+rust-version = "1.85"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
