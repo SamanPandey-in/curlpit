@@ -20,6 +20,7 @@ mod settings_page;
 mod side;
 mod tree;
 pub(crate) mod trust_banner;
+mod var_assist;
 
 use crate::actions::{
     CloseTab, FindInResponse, NewTab, PaletteDismiss, PaletteNext, PalettePrev, ReopenTab,
@@ -34,6 +35,7 @@ use crate::ui::{
     avail_width, char_w, icon_btn, kbd, key_label, mono, one_line, primary_key, quiet_btn,
     under_tab, Status, GUTTER,
 };
+use crate::var_complete::var_input;
 use crate::workspace::Workspace;
 use at_core::lines::{build_rows, CONT};
 use at_core::Method;
@@ -60,6 +62,7 @@ impl Render for Workspace {
             self.focused_once = true;
         }
         self.ensure_tree();
+        self.var_assist(window, cx);
         // ---- viewer geometry (depends on the window width and the sidebar's) ----
         let side_w = if self.sidebar_open {
             self.side_split
@@ -221,6 +224,7 @@ impl Render for Workspace {
         } else {
             Button::new("send").primary().label("Send")
         };
+        let var_chips = self.render_var_chips(cx);
         let url_bar = div()
             .flex_none()
             .flex()
@@ -250,7 +254,7 @@ impl Render for Workspace {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(Input::new(&tab.url).appearance(false)),
+                            .child(var_input(&tab.url, Input::new(&tab.url).appearance(false))),
                     ),
             )
             .child(
@@ -397,16 +401,28 @@ impl Render for Workspace {
                     })
                     .into_any_element()
             }
-            Status::Error(e) => div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(S1 + 2.0))
-                .min_w_0()
-                .text_color(p.status_error())
-                .child(Icon::new(IconName::CircleX).small().flex_none())
-                .child(div().flex_1().min_w_0().truncate().child(one_line(e)))
-                .into_any_element(),
+            // The same pill as a status code, so a failed send reads like a finished one.
+            // The text keeps its natural width (no `flex_1`, which gave it a zero basis) and
+            // only ellipsizes when the bar runs out of room.
+            Status::Error(e) => {
+                let col = p.status_error();
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(S1))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .px(px(6.))
+                    .py(px(1.))
+                    .rounded(px(3.))
+                    .bg(col.alpha(0.16))
+                    .text_color(col)
+                    .text_size(px(SMALL_TEXT))
+                    .child(Icon::new(IconName::CircleX).xsmall().flex_none())
+                    .child(div().min_w_0().truncate().child(one_line(e)))
+                    .into_any_element()
+            }
         };
 
         let has_body = tab.res_tab == ResTab::Body && tab.view.is_some();
@@ -478,8 +494,10 @@ impl Render for Workspace {
                 .child(Icon::new(IconName::TriangleAlert).xsmall())
                 .child(div().truncate().child(w))
         });
+        // Always the pane's full width, whatever the outcome on its right measures.
         let resp_header = div()
             .flex_none()
+            .w_full()
             .h(px(BAR_H - 2.0))
             .flex()
             .flex_row()
@@ -555,7 +573,14 @@ impl Render for Workspace {
                     .justify_end()
                     .gap(px(S3))
                     .children(warning)
-                    .child(div().flex_shrink().min_w_0().max_w(px(520.)).child(outcome)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_shrink()
+                            .min_w_0()
+                            .max_w(px(520.))
+                            .child(outcome),
+                    ),
             );
 
         let viewer = match &tab.view {
@@ -795,6 +820,7 @@ impl Render for Workspace {
             .child(self.render_tab_bar(cx))
             .child(toolbar)
             .child(url_bar)
+            .children(var_chips)
             .children(self.render_trust_banner(cx))
             .child(
                 div().flex_1().min_h_0().child(

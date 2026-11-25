@@ -17,6 +17,7 @@ actions!(
         ToggleCommandPalette,
         PaletteNext,
         PalettePrev,
-        PaletteDismiss
+        PaletteDismiss,
+        AcceptVarCompletion
     ]
 );

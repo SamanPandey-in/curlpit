@@ -19,11 +19,12 @@ mod sidebar;
 mod theme;
 mod tree;
 mod ui;
+mod var_complete;
 mod workspace;
 
 use crate::actions::{
-    CloseTab, FindInResponse, NewTab, PaletteDismiss, PaletteNext, PalettePrev, ReopenTab,
-    SaveRequest, SendRequest, ToggleCommandPalette, ToggleSidebar,
+    AcceptVarCompletion, CloseTab, FindInResponse, NewTab, PaletteDismiss, PaletteNext,
+    PalettePrev, ReopenTab, SaveRequest, SendRequest, ToggleCommandPalette, ToggleSidebar,
 };
 use crate::workspace::Workspace;
 use gpui::prelude::*;
@@ -82,6 +83,8 @@ fn main() {
                 KeyBinding::new("up", PalettePrev, Some("Palette")),
                 KeyBinding::new("down", PaletteNext, Some("Palette")),
                 KeyBinding::new("escape", PaletteDismiss, Some("Palette")),
+                // Tab takes the open `{{variable}}` completion (else it carries on as usual).
+                KeyBinding::new("tab", AcceptVarCompletion, Some("VarInput")),
             ]);
             // A comfortable default, but never larger than the screen: a fixed size taller than
             // a 768 px laptop display put the title bar above the top edge, out of reach.

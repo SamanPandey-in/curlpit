@@ -4,6 +4,7 @@ use crate::editor::Which;
 use crate::request_tab::RequestTab;
 use crate::theme::{Palette, S1, S2, SMALL_TEXT};
 use crate::ui::{icon_btn, quiet_btn};
+use crate::var_complete::var_input;
 use crate::workspace::Workspace;
 use gpui::prelude::*;
 use gpui::{div, px, Context};
@@ -81,7 +82,7 @@ impl Workspace {
                             .flex_1()
                             .min_w_0()
                             .when(!row.enabled, |d| d.opacity(0.5))
-                            .child(Input::new(&row.value).small()),
+                            .child(var_input(&row.value, Input::new(&row.value).small())),
                     )
                     .child(div().w(px(EDGE_W)).flex_none().child(
                         icon_btn((del_id, ix), IconName::Close, "Remove row", cx).on_click(

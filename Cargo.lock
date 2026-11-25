@@ -521,6 +521,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "lsp-types",
  "serde_json",
  "tokio",
  "tokio-util",

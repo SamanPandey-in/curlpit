@@ -34,9 +34,17 @@ impl Workspace {
     /// The active tab's request as code in `lang`, plus whether the snippet holds resolved
     /// secret values. Shared by the Code view and "Copy cURL" (FR-IE-08).
     pub(crate) fn snippet_for(&self, lang: Lang, cx: &App) -> Result<(String, bool), String> {
-        let vars = self.variables();
+        // `{{$dynamic}}` names stay placeholders in snippets: the view re-renders often, and a
+        // fresh UUID per frame would be noise rather than what will be sent.
+        let vars = Variables {
+            keep_dynamic: true,
+            ..self.variables()
+        };
         let req = sendable(self.tab().current_request(cx), &vars);
-        let none = Variables::default();
+        let none = Variables {
+            keep_dynamic: true,
+            ..Variables::default()
+        };
         let built = if self.code_keep_vars {
             build_template(&req, &none)
         } else {

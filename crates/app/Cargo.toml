@@ -27,3 +27,6 @@ async-channel = "2"
 # Only to build the syntax theme: gpui-component can construct one solely by
 # deserializing it (see theme.rs).
 serde_json.workspace = true
+# The `{{variable}}` completion, hover and highlight hooks are gpui-component's LSP-shaped
+# provider traits; same version gpui-component already builds, so nothing new compiles.
+lsp-types = "0.97"

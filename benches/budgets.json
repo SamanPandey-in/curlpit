@@ -1,0 +1,32 @@
+{
+  "_comment": "Machine-readable budgets and baselines for .github/workflows/budgets.yml (scripts/check_budgets.py). Human-readable source: docs/BASELINE.md. Sizes are bytes; 1 MB here = 1 MiB = 1,048,576 bytes, matching BASELINE.md (15,092,240 bytes = 14.4 MB).",
+  "max_regression_pct": 10,
+  "binary_size": {
+    "limit_bytes": 41943040,
+    "limit_source": "docs/BASELINE.md: release binary <= 40 MB target",
+    "baselines": {
+      "aarch64-apple-darwin": {
+        "bytes": 15092240,
+        "source": "docs/BASELINE.md, Phase 4 measurements, MacBook Air M5, 2026-11-09"
+      },
+      "x86_64-apple-darwin": null,
+      "x86_64-unknown-linux-gnu": null,
+      "aarch64-unknown-linux-gnu": null,
+      "x86_64-pc-windows-msvc": null
+    }
+  },
+  "cold_start_ms": {
+    "limit": 500,
+    "limit_source": "docs/BASELINE.md: first render after main() <= 500 ms",
+    "baseline": 347,
+    "measured_in_ci": false,
+    "todo": "Needs a display and an app-side hook that prints the first-frame time and exits; see the TODO in budgets.yml."
+  },
+  "idle_rss_mb": {
+    "limit": 120,
+    "limit_source": "docs/BASELINE.md: idle RSS <= 120 MB",
+    "baseline": 70.1,
+    "measured_in_ci": false,
+    "todo": "Needs a display (a software-rendered Xvfb RSS is not comparable to the GPU baseline); see the TODO in budgets.yml."
+  }
+}
